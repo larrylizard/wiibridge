@@ -155,3 +155,21 @@ cursor position updates in real time), but in at least one VM test
 environment the drawn cursor icon didn't visually follow. Suspected to be
 a virtual-display cursor-plane quirk specific to that VM rather than a
 bug in the input device itself; needs confirming on real hardware.
+
+## Troubleshooting: "answers every scan as a general scan"
+
+The app checks each Bluetooth adapter by scanning with an inquiry access
+code that no device answers. If any device turns up, that adapter (or its
+driver stack) is running an ordinary general inquiry no matter what scan
+type it's asked for. Wii remotes only answer the limited inquiry, so such
+an adapter can never hear one -- everything else can look perfectly
+healthy. The app skips it and says so; use a different adapter (an
+external USB dongle is fine). Observed on one host with a MediaTek
+adapter that worked correctly on another machine, so it isn't necessarily
+the chip. You can run the same check by hand:
+
+```
+hcitool -i hci0 inq --iac=0x9e8b01 --flush --length=4
+```
+
+Anything listed means the requested scan type is being ignored.

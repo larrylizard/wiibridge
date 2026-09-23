@@ -26,7 +26,7 @@ CAP_NET_RAW/CAP_NET_ADMIN on hcitool/hciconfig, both granted by the .deb
 (or packaging/setup-permissions.sh for the AppImage).
 """
 
-__version__ = "0.2.3"
+__version__ = "0.2.4"
 
 import atexit
 import ctypes
@@ -232,6 +232,36 @@ def discover_candidates(hci_name):
     return found, ""
 
 
+LAP_IGNORED_MESSAGE = ("{hci} answers every scan as a general scan, whatever type is requested "
+                       "(it listed a device for a scan address nothing uses), so it can't hear Wii "
+                       "remotes. Try a different Bluetooth adapter.")
+LAP_IGNORED = set()  # adapters proven to answer every scan as a general one
+UNUSED_LAP = "0x9e8b01"  # a dedicated inquiry access code no device ever answers
+
+
+def lap_test(hci_name):
+    """Does this adapter (or its driver stack) honour the scan type it's
+    asked for? Wii remotes only answer the limited (LIAC) inquiry, so an
+    adapter that silently runs a general inquiry instead can never hear
+    one, no matter how well everything else works. Test: scan with an
+    access code nothing answers. If any device turns up, the requested type
+    is being ignored. (If nothing is nearby the test proves nothing, so it
+    is repeated; once an adapter is caught it stays flagged.)"""
+    st = SCAN_STATS.setdefault(hci_name, {"passes": 0, "heard": {}, "control": {}, "control_time": None})
+    try:
+        res = subprocess.run(["hcitool", "-i", hci_name, "inq", f"--iac={UNUSED_LAP}", "--flush", "--length=2"],
+                             capture_output=True, text=True, timeout=10)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return
+    heard = [a.upper() for a, _c in MAC_RE.findall(res.stdout)]
+    st["lap_test_time"] = time.strftime("%H:%M:%S")
+    st["lap_test_heard"] = heard
+    if heard and hci_name not in LAP_IGNORED:
+        LAP_IGNORED.add(hci_name)
+        log(f"{hci_name}: heard {heard[0]} on a scan address nothing answers -- this adapter ignores "
+            f"the requested scan type, so it cannot hear Wii remotes")
+
+
 def control_scan(hci_name):
     """A general (GIAC) inquiry, ignoring the remote filter: does this
     adapter hear ANY discoverable Bluetooth device? Tells "the adapter's
@@ -395,6 +425,10 @@ def diagnostics():
                    f"hcitool exit {st.get('last_rc')}, output: {st.get('last_out')!r} {st.get('last_err') or ''}")
         out.append("   devices heard by those scans: " + (", ".join(
             f"{a} class 0x{c:06x}" for a, c in st["heard"].items()) or "none"))
+        lt = st.get("lap_test_time")
+        out.append(f"   unused-scan-address test at {lt or 'not run yet'}: "
+                   + ("HEARD " + ", ".join(st["lap_test_heard"]) + "  => adapter IGNORES the requested scan type"
+                      if hci in LAP_IGNORED else "heard nothing (requested scan type honoured, as far as tested)" if lt else "-"))
         ctl = st["control"]
         out.append(f"   control scan (general inquiry) at {st['control_time'] or 'not run yet'}: "
                    + ("heard nothing" if st["control_time"] and not ctl else
@@ -1019,13 +1053,19 @@ def serve():
         adapters = list_adapters()
         scan_errors = []
         for hci_name, local_addr in adapters:
+            if hci_name in LAP_IGNORED:
+                scan_errors.append(LAP_IGNORED_MESSAGE.format(hci=hci_name))
+                continue
             found, err = discover_candidates(hci_name)
             if err:
                 scan_errors.append(err)
             else:
                 n = SCAN_STATS[hci_name]["passes"]
-                if n % 5 == 0:
+                if n == 1 or n % 5 == 0:
                     control_scan(hci_name)
+                    lap_test(hci_name)
+                    if hci_name in LAP_IGNORED:
+                        continue
                 if n % 6 == 1:
                     log(f"scanning on {hci_name}: pass {n}, remotes heard so far: "
                         f"{sum(1 for c in SCAN_STATS[hci_name]['heard'].values() if ((c >> 8) & 0x1F) == 5)}")
