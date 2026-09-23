@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+# Config is machine-specific runtime state, not source (lives in /etc/wii_control at runtime)
+mapping.json
+pointer.json
+
+# Build tooling and output -- downloaded/generated, not source
+packaging/appimagetool.AppImage
+packaging/*.AppImage
+packaging/AppDir/usr/bin/*.py

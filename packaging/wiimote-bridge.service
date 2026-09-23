@@ -1,0 +1,15 @@
+[Unit]
+Description=Wii Remote (clone-compatible) Bluetooth bridge
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+# Adjust this path to wherever you cloned the repo.
+ExecStart=/usr/bin/python3 /opt/wii_control/wiimote_bridge.py
+Restart=on-failure
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target

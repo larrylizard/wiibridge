@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Wii Remote Control
+Comment=Connect and remap Wii Remotes (including clones) without an emulator
+Exec=wiimote-control
+Icon=wiimote-control
+Categories=Utility;Game;
+Terminal=false

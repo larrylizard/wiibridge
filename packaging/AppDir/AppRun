@@ -1,0 +1,6 @@
+#!/bin/bash
+# Launches the Wii Remote Control GUI. The GUI itself launches the
+# privileged daemon (wiimote_bridge.py) on demand via pkexec if it isn't
+# already running -- see wiimote_gui.py's ensure_daemon_running().
+HERE="$(dirname "$(readlink -f "${0}")")"
+exec python3 "$HERE/usr/bin/wiimote_gui.py" "$@"
