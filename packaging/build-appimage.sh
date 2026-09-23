@@ -44,7 +44,7 @@ if [ ! -x AppDir/usr/python/bin/python3 ]; then
 fi
 
 mkdir -p AppDir/usr/bin
-cp ../wiimote_bridge.py ../wiimote_gui.py AppDir/usr/bin/
+cp ../wiimote_bridge.py ../wiimote_gui.py setup-permissions.sh AppDir/usr/bin/
 
 ARCH=x86_64 ./"$APPIMAGETOOL" AppDir Wii-Remote-Control-x86_64.AppImage
 

@@ -154,7 +154,16 @@ def list_adapters():
         out = subprocess.run(["hciconfig", "-a"], capture_output=True, text=True, timeout=5).stdout
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return []
-    return [(name, addr.upper()) for name, addr in ADAPTER_RE.findall(out)]
+    adapters = [(name, addr.upper()) for name, addr in ADAPTER_RE.findall(out)]
+    for name, _addr in adapters:
+        # An adapter can come up administratively DOWN (e.g. after a
+        # passthrough/replug); bring it up so inquiry can actually work.
+        # Idempotent and cheap if it's already up.
+        try:
+            subprocess.run(["hciconfig", name, "up"], capture_output=True, timeout=3)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+    return adapters
 
 
 def discover_candidates(hci_name):
@@ -278,6 +287,14 @@ class IPCServer(threading.Thread):
             os.unlink(sock_path)
         except FileNotFoundError:
             pass
+        except PermissionError:
+            # Leftover from a previous run under a different user (e.g. an
+            # old root/pkexec-launched instance) -- /tmp's sticky bit means
+            # only that file's owner can remove it.
+            raise SystemExit(
+                f"{sock_path} exists but is owned by another user and can't "
+                f"be replaced. Remove it manually (sudo rm -f {sock_path}) and try again."
+            )
         self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.srv.bind(sock_path)
         os.chmod(sock_path, 0o666)

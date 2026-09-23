@@ -20,41 +20,58 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 from wiimote_bridge import INPUT_NAMES, SOCK_PATH
 
 MAX_SLOTS = 4
 
+SETUP_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "setup-permissions.sh")
 
-def ensure_daemon_running():
-    """The daemon needs root (raw Bluetooth sockets + /dev/uinput). Rather
-    than requiring a separate systemd install step, launch it on demand
-    via pkexec -- this also makes the GUI work unmodified when run from
-    inside a read-only-mounted AppImage."""
+
+def _daemon_reachable():
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(1)
         s.connect(SOCK_PATH)
         s.close()
-        return  # already running
+        return True
     except OSError:
-        pass
+        return False
+
+
+def ensure_daemon_running():
+    """The daemon needs /dev/uinput access and raw HCI capability, not
+    full root -- see packaging/setup-permissions.sh, a one-time script
+    that grants those narrowly (udev rule + group for uinput, setcap on
+    hcitool/hciconfig for HCI) so the daemon runs as a normal user with no
+    password prompt on every launch. (An earlier version of this used
+    pkexec on every launch instead; that turned out to fail silently
+    whenever no polkit authentication agent was running in the session,
+    with no error and no prompt, so it's gone.)
+
+    Returns True if the daemon is reachable by the time this returns."""
+    if _daemon_reachable():
+        return True
 
     bridge_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wiimote_bridge.py")
     try:
         log_file = open("/tmp/wiimote_bridge.log", "a")
         subprocess.Popen(
-            # sys.executable is this same interpreter -- the AppImage's
-            # bundled Python when run from there, so the daemon always
-            # gets the one with evdev installed, regardless of the host's
-            # own python3 (or lack of one with evdev).
-            ["pkexec", sys.executable, bridge_path],
+            [sys.executable, bridge_path],
             stdout=log_file, stderr=log_file,
             start_new_session=True,
         )
     except OSError as ex:
-        print(f"Could not launch wiimote_bridge daemon via pkexec: {ex}")
+        print(f"Could not launch wiimote_bridge daemon: {ex}")
+        return False
+
+    for _ in range(20):  # up to ~2s for it to bind its socket
+        time.sleep(0.1)
+        if _daemon_reachable():
+            return True
+    return False
+
 
 SHORT_NAMES = {
     "A": "A", "B": "B", "ONE": "1", "TWO": "2", "MINUS": "-", "PLUS": "+",
@@ -390,8 +407,19 @@ class GuiApp:
 
 
 def main():
-    ensure_daemon_running()
+    daemon_ok = ensure_daemon_running()
     root = tk.Tk()
+    if not daemon_ok:
+        root.withdraw()
+        messagebox.showwarning(
+            "One-time setup needed",
+            "The Wii Remote daemon couldn't start. This is normally a "
+            "one-time permissions step, not an error each run:\n\n"
+            f"  sudo {os.path.abspath(SETUP_SCRIPT)}\n\n"
+            "Log out and back in afterward, then relaunch this app. "
+            "(Details: /tmp/wiimote_bridge.log)",
+        )
+        root.deiconify()
     GuiApp(root)
     root.mainloop()
 

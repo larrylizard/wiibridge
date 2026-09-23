@@ -9,7 +9,9 @@ Type=simple
 ExecStart=/usr/bin/python3 /opt/wii_control/wiimote_bridge.py
 Restart=on-failure
 RestartSec=3
-User=root
+# Run setup-permissions.sh once first, then set this to your own user --
+# no root needed (see that script for what it grants and why).
+User=CHANGE_ME
 
 [Install]
 WantedBy=multi-user.target

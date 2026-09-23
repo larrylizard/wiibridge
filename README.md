@@ -30,17 +30,36 @@ Dolphin is not involved anywhere in this pipeline.
 - **`wiimote_bridge.py`** -- the daemon. Discovers remotes, connects to
   them, parses their Bluetooth HID reports, and exposes each one to the
   OS as `uinput` devices (gamepad, keyboard, and optionally an absolute
-  IR-pointer device). Requires root (raw Bluetooth sockets +
-  `/dev/uinput`). Supports multiple remotes concurrently, spread across
-  every Bluetooth adapter present on the machine (useful if one adapter
-  hits a hardware connection-count limit -- some cheap dongles cap out
-  around 2 simultaneous connections).
+  IR-pointer device). Runs as a normal user, not root -- see
+  `packaging/setup-permissions.sh` for the one-time setup that makes that
+  possible. Supports multiple remotes concurrently, spread across every
+  Bluetooth adapter present on the machine (useful if one adapter hits a
+  hardware connection-count limit -- some cheap dongles cap out around 2
+  simultaneous connections).
 - **`wiimote_gui.py`** -- a Tkinter GUI. Shows up to 4 connected remotes
   side by side, each with live button state, independent remapping, IR
   pointer controls, and a Settings tab listing detected Bluetooth
   adapters. Talks to the daemon over a local Unix socket
-  (`/tmp/wiimote_bridge.sock`) and launches it on demand via `pkexec` if
-  it isn't already running.
+  (`/tmp/wiimote_bridge.sock`) and launches it on demand if it isn't
+  already running.
+
+### Why the daemon doesn't need root
+
+Only `/dev/uinput` and raw HCI operations (the LIAC inquiry scan) need
+elevated privilege -- Bluetooth L2CAP data sockets (the actual connection
+to each remote) need none. Rather than running the whole daemon as root
+for the sake of those two things, `setup-permissions.sh` grants them
+narrowly, once:
+- a udev rule + `input` group membership for `/dev/uinput` (the same
+  mechanism many other controller-remapping tools use)
+- `cap_net_raw`/`cap_net_admin` via `setcap` on the `hcitool`/`hciconfig`
+  binaries themselves, which the daemon just shells out to
+
+An earlier version of this launched the daemon via `pkexec` on every run
+instead. That turned out to fail silently on at least one machine --
+`pkexec` just returned with no prompt and no error when no polkit
+authentication agent was running in the session -- which is a bad
+foundation for something meant to "just work," so it's gone.
 
 Config (button mappings, pointer settings) is stored per remote (by
 Bluetooth address) under `/etc/wii_control/`, since the daemon always runs
@@ -52,6 +71,11 @@ as root regardless of how it was launched.
 
 ```
 packaging/build-appimage.sh
+
+# one-time, so the daemon can run unprivileged -- see "Why the daemon
+# doesn't need root" above. Log out and back in afterward.
+sudo packaging/AppDir/usr/bin/setup-permissions.sh
+
 packaging/Wii-Remote-Control-x86_64.AppImage
 ```
 
@@ -59,10 +83,8 @@ Fully self-contained: it bundles its own Python interpreter with `evdev`
 and Tkinter already installed, so it doesn't depend on what's on the
 host's system Python (the first build downloads that portable interpreter
 and caches it in `packaging/AppDir/usr/python/`, ~95MB uncompressed,
-~27MB in the built AppImage). The GUI launches; if the daemon isn't
-already running it prompts for your password via `pkexec` to start it,
-using that same bundled interpreter. No separate install step needed
-beyond `bluez` and `pkexec` being present on the host (see Requirements).
+~27MB in the built AppImage). If you skip the one-time setup, the app
+still launches and tells you the exact command to run.
 
 ### Manual / systemd (alternative, e.g. headless setups)
 
@@ -95,7 +117,8 @@ as needed.
 
 For the AppImage:
 - `bluez` (`hcitool`, `hciconfig`, `bluetoothd`)
-- `pkexec` (part of polkit), for the on-demand daemon launch
+- `setcap`/`usermod`/`udevadm` (standard on any systemd-based distro), for
+  the one-time `setup-permissions.sh` step
 - A C compiler (`gcc`) is needed once, on whichever machine *builds* the
   AppImage, to compile `evdev`'s native extension into the bundled
   interpreter -- not needed on machines that just run the built AppImage.

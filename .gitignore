@@ -8,5 +8,5 @@ pointer.json
 # Build tooling and output -- downloaded/generated, not source
 packaging/appimagetool.AppImage
 packaging/*.AppImage
-packaging/AppDir/usr/bin/*.py
+packaging/AppDir/usr/bin/
 packaging/AppDir/usr/python/
