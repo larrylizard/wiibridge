@@ -348,10 +348,12 @@ class GuiApp:
         ).pack(anchor="w")
         self.grant_btn = tk.Button(self.setup_frame, text="Grant permission...", command=self._on_grant)
         self.grant_btn.pack(anchor="w", pady=(8, 0))
+        self.setup_detail = tk.Label(self.setup_frame, text="", justify="left", wraplength=620, fg="#555")
         self.setup_msg = tk.Label(self.setup_frame, text="", justify="left", wraplength=620, fg="#c62828")
 
         self.status_lbl = tk.Label(controllers_tab, text="Connecting to daemon...", anchor="w")
         self.status_lbl.pack(fill="x", padx=8, pady=(8, 2))
+        self.scan_lbl = tk.Label(controllers_tab, text="", anchor="w", justify="left", wraplength=620, fg="#c62828")
 
         cols = tk.Frame(controllers_tab)
         cols.pack(padx=5, pady=(0, 8))
@@ -425,6 +427,10 @@ class GuiApp:
 
     def _show_setup(self):
         self.setup_frame.pack(fill="x", padx=8, pady=(8, 2), before=self.status_lbl)
+        detail = _daemon_log_tail()
+        if detail:
+            self.setup_detail.config(text=f"Daemon says: {detail}")
+            self.setup_detail.pack(anchor="w", pady=(6, 0))
 
     def _on_grant(self):
         self.grant_btn.config(state="disabled")
@@ -488,6 +494,13 @@ class GuiApp:
             if col:
                 for name, pressed in msg.get("buttons", {}).items():
                     col.set_button_state(name, pressed)
+        elif t == "scan":
+            err = msg.get("error", "")
+            if err:
+                self.scan_lbl.config(text=f"Bluetooth scanning problem: {err}")
+                self.scan_lbl.pack(fill="x", padx=8, after=self.status_lbl)
+            else:
+                self.scan_lbl.pack_forget()
         elif t == "adapters":
             self._update_adapters(msg.get("adapters", []))
 

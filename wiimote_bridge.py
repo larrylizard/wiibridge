@@ -29,6 +29,7 @@ CAP_NET_RAW/CAP_NET_ADMIN on hcitool/hciconfig, both granted by the .deb
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import threading
@@ -167,26 +168,67 @@ def list_adapters():
 
 
 def discover_candidates(hci_name):
-    """One LIAC inquiry pass on a given adapter. Returns MAC addresses in
-    the Bluetooth 'Peripheral' major device class -- in practice nothing
-    but a synced Wii Remote answers a LIAC inquiry at all, so this filter
-    mainly guards against odd false positives rather than being load-bearing."""
+    """One LIAC inquiry pass on a given adapter. Returns (addresses, error):
+    MAC addresses in the Bluetooth 'Peripheral' major device class -- in
+    practice nothing but a synced Wii Remote answers a LIAC inquiry at all,
+    so that filter mainly guards against odd false positives -- and a
+    human-readable error string if the scan itself failed (else "").
+    hcitool's own error is kept rather than discarded: a scan that fails
+    (e.g. "Operation not permitted" without the HCI capability) looks
+    exactly like a scan that simply found nothing."""
     try:
-        out = subprocess.run(
+        res = subprocess.run(
             ["hcitool", "-i", hci_name, "inq", "--iac=liac", "--flush", f"--length={SCAN_LENGTH}"],
             capture_output=True, text=True, timeout=SCAN_LENGTH * 1.28 + 5,
-        ).stdout
-    except (subprocess.TimeoutExpired, FileNotFoundError) as ex:
-        log(f"{hci_name}: discovery failed: {ex}")
-        return set()
+        )
+    except subprocess.TimeoutExpired:
+        return set(), f"{hci_name}: scan timed out"
+    except FileNotFoundError:
+        return set(), "hcitool not found (is bluez installed?)"
+
+    if res.returncode != 0:
+        detail = (res.stderr or res.stdout).strip().splitlines()
+        return set(), f"{hci_name}: {detail[-1] if detail else f'scan failed (exit {res.returncode})'}"
 
     found = set()
-    for addr, cod_hex in MAC_RE.findall(out):
+    for addr, cod_hex in MAC_RE.findall(res.stdout):
         cod = int(cod_hex, 16)
         major_device_class = (cod >> 8) & 0x1F
         if major_device_class == 0x05:  # Peripheral
             found.add(addr.upper())
-    return found
+    return found, ""
+
+
+def missing_permissions():
+    """What this process needs that the system hasn't granted yet. The
+    daemon needs BOTH /dev/uinput and the HCI capability on hcitool and
+    hciconfig; checking only the first meant a machine with uinput access
+    but no capability ran "fine" and then silently found no remotes."""
+    missing = []
+    if not os.access("/dev/uinput", os.W_OK):
+        missing.append("write access to /dev/uinput")
+    for tool in ("hcitool", "hciconfig"):
+        path = shutil.which(tool)
+        if not path:
+            missing.append(f"{tool} is not installed (install bluez)")
+            continue
+        try:
+            os.getxattr(path, "security.capability")
+        except OSError:
+            missing.append(f"the Bluetooth scan capability on {tool}")
+    return missing
+
+
+SCAN_ERROR = {"text": ""}
+
+
+def set_scan_error(ipc, text):
+    """Report the current scan problem ("" = none) to the log and GUI,
+    only when it changes, so a persistent failure doesn't spam."""
+    if SCAN_ERROR["text"] != text:
+        SCAN_ERROR["text"] = text
+        log(f"scan: {text}" if text else "scan: ok")
+        ipc.broadcast({"type": "scan", "error": text})
 
 
 class Mapping:
@@ -315,6 +357,8 @@ class IPCServer(threading.Thread):
             self._send(conn, {"type": "mapping", "addr": addr, "mapping": self.mapping.get_for(addr)})
             self._send(conn, {"type": "pointer", "addr": addr, "config": self.pointer_cfg.get_for(addr)})
         self._send(conn, devices_message())
+        if SCAN_ERROR["text"]:
+            self._send(conn, {"type": "scan", "error": SCAN_ERROR["text"]})
 
     def broadcast_device_snapshot(self, addr):
         self.broadcast({"type": "mapping", "addr": addr, "mapping": self.mapping.get_for(addr)})
@@ -775,10 +819,11 @@ def watchdog():
 
 
 def main():
-    if not os.access("/dev/uinput", os.W_OK):
+    missing = missing_permissions()
+    if missing:
         raise SystemExit(
-            "No write access to /dev/uinput -- install the .deb, or run "
-            "packaging/setup-permissions.sh once. Exiting."
+            "Missing permissions: " + "; ".join(missing) + ". Install the .deb, "
+            "or use the app's Grant permission button (packaging/setup-permissions.sh)."
         )
     os.makedirs(CONFIG_DIR, exist_ok=True)
     mapping = Mapping(MAPPING_PATH)
@@ -795,10 +840,12 @@ def main():
                 del active[addr]
 
         adapters = list_adapters()
-        if not adapters:
-            log("no local Bluetooth adapters found")
+        scan_errors = []
         for hci_name, local_addr in adapters:
-            for addr in discover_candidates(hci_name):
+            found, err = discover_candidates(hci_name)
+            if err:
+                scan_errors.append(err)
+            for addr in found:
                 if addr in active:
                     continue
                 log(f"candidate found: {addr} (via {hci_name})")
@@ -807,6 +854,13 @@ def main():
                 active[addr] = t
                 t.start()
                 time.sleep(RECONNECT_BACKOFF)  # avoid slamming a second inquiry mid-connect
+
+        if not adapters:
+            set_scan_error(ipc, "No Bluetooth adapter found.")
+        elif len(scan_errors) == len(adapters):
+            set_scan_error(ipc, "; ".join(scan_errors))
+        else:
+            set_scan_error(ipc, "")
 
         time.sleep(SCAN_INTERVAL)
 
