@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 
-VERSION=0.1.0
+VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' ../wiimote_bridge.py)
 PKG=wii-control_${VERSION}_all
 STAGE=build-deb/$PKG
 

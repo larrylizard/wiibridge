@@ -26,6 +26,8 @@ CAP_NET_RAW/CAP_NET_ADMIN on hcitool/hciconfig, both granted by the .deb
 (or packaging/setup-permissions.sh for the AppImage).
 """
 
+__version__ = "0.2.1"
+
 import atexit
 import ctypes
 import errno
@@ -150,6 +152,9 @@ def log(msg):
 ADAPTER_RE = re.compile(r"^(hci\d+):.*?\n\s*BD Address:\s*([0-9A-Fa-f:]{17})", re.MULTILINE | re.DOTALL)
 
 
+ADAPTER_UP_ERRORS = {}
+
+
 def list_adapters():
     """Local Bluetooth adapters as [(hci_name, bd_addr), ...]. Cheap
     dongles (e.g. CSR8510) often hard-cap around 2 simultaneous ACL
@@ -163,13 +168,20 @@ def list_adapters():
         return []
     adapters = [(name, addr.upper()) for name, addr in ADAPTER_RE.findall(out)]
     for name, _addr in adapters:
-        # An adapter can come up administratively DOWN (e.g. after a
-        # passthrough/replug); bring it up so inquiry can actually work.
-        # Idempotent and cheap if it's already up.
+        # An adapter can come up administratively DOWN (after a replug, or
+        # with Bluetooth switched off in the desktop); bring it up so
+        # inquiry can work. Idempotent if it's already up. If it can't be
+        # brought up, remember why -- otherwise the scan just fails with a
+        # cryptic "Network is down" and the user can't tell what to do.
         try:
-            subprocess.run(["hciconfig", name, "up"], capture_output=True, timeout=3)
+            res = subprocess.run(["hciconfig", name, "up"], capture_output=True, text=True, timeout=3)
         except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
+            continue
+        if res.returncode == 0:
+            ADAPTER_UP_ERRORS.pop(name, None)
+        else:
+            lines = (res.stderr or res.stdout).strip().splitlines()
+            ADAPTER_UP_ERRORS[name] = lines[-1] if lines else "could not be enabled"
     return adapters
 
 
@@ -192,6 +204,10 @@ def discover_candidates(hci_name):
     except FileNotFoundError:
         return set(), "hcitool not found (is bluez installed?)"
 
+    if hci_name in ADAPTER_UP_ERRORS:
+        reason = ADAPTER_UP_ERRORS[hci_name]
+        hint = " -- turn Bluetooth on in your system settings" if "RF-kill" in reason else ""
+        return set(), f"{hci_name} is disabled and couldn't be enabled ({reason}){hint}"
     if res.returncode != 0:
         detail = (res.stderr or res.stdout).strip().splitlines()
         return set(), f"{hci_name}: {detail[-1] if detail else f'scan failed (exit {res.returncode})'}"
@@ -910,7 +926,7 @@ def serve():
     threading.Thread(target=watchdog, daemon=True).start()
 
     active = {}  # addr -> thread
-    log("Wiimote bridge starting. Hold SYNC (or 1+2) on the remote to connect it.")
+    log(f"Wii Remote Control v{__version__} - service starting. Hold SYNC on a remote to connect it.")
     while True:
         for addr in list(active):
             if not active[addr].is_alive():

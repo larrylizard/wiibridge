@@ -294,7 +294,7 @@ class GuiApp:
         self.root.after(50, self._poll_queue)
 
     def _build_ui(self):
-        self.root.title("Wii Remote Control")
+        self.root.title(f"Wii Remote Control v{bridge.__version__}")
 
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill="both", expand=True)
@@ -352,6 +352,7 @@ class GuiApp:
 
         tk.Button(parent, text="Search for Adapters", command=self._refresh_adapters).pack(anchor="w", padx=10, pady=(0, 10))
 
+        tk.Label(parent, text=f"Version {bridge.__version__}", anchor="w").pack(anchor="w", padx=10, pady=(0, 6))
         log_path = os.path.expanduser("~/.cache/wii-control/app.log")
         tk.Label(parent, text="Log file (what the service is doing, and any errors):", anchor="w").pack(anchor="w", padx=10)
         tk.Label(parent, text=log_path, anchor="w", fg="#555").pack(anchor="w", padx=10)
@@ -466,7 +467,7 @@ class GuiApp:
 
     def _set_connected(self, connected):
         self.status_lbl.config(
-            text="Connected to the Wii Remote daemon" if connected else "Daemon not running",
+            text="Ready - hold the SYNC button on a remote to connect it" if connected else "Service not running",
             fg="#2e7d32" if connected else "#c62828",
         )
         if connected:
@@ -495,8 +496,10 @@ class GuiApp:
             if err:
                 self.scan_lbl.config(text=f"Bluetooth scanning problem: {err}")
                 self.scan_lbl.pack(fill="x", padx=8, after=self.status_lbl)
+                self.status_lbl.config(text="Not scanning for remotes", fg="#c62828")
             else:
                 self.scan_lbl.pack_forget()
+                self._set_connected(True)
         elif t == "adapters":
             self._update_adapters(msg.get("adapters", []))
 

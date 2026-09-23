@@ -75,7 +75,7 @@ Bluetooth address) under `~/.config/wii_control/`.
 
 ```
 packaging/build-deb.sh
-sudo apt install ./packaging/wii-control_0.1.0_all.deb
+sudo apt install ./packaging/wii-control_<version>_all.deb
 wii-control
 ```
 
@@ -90,7 +90,7 @@ no separate permission script to run and no password prompt from the app.
 
 ```
 packaging/build-appimage.sh
-packaging/Wii-Remote-Control-x86_64.AppImage
+packaging/Wii-Remote-Control-<version>-x86_64.AppImage
 ```
 
 The GUI always opens. The first time on a computer it shows a "One-time

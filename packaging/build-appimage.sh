@@ -8,6 +8,8 @@
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 
+VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' ../wiimote_bridge.py)
+OUT="Wii-Remote-Control-${VERSION}-x86_64.AppImage"
 PYTHON_RELEASE=20260901
 PYTHON_VERSION=3.12.14
 
@@ -46,6 +48,7 @@ fi
 mkdir -p AppDir/usr/bin
 cp ../wiimote_bridge.py ../wiimote_gui.py setup-permissions.sh AppDir/usr/bin/
 
-ARCH=x86_64 ./"$APPIMAGETOOL" AppDir Wii-Remote-Control-x86_64.AppImage
+rm -f Wii-Remote-Control-*.AppImage
+ARCH=x86_64 ./"$APPIMAGETOOL" AppDir "$OUT"
 
-echo "Built packaging/Wii-Remote-Control-x86_64.AppImage"
+echo "Built packaging/$OUT"
