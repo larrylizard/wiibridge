@@ -62,12 +62,26 @@ authentication agent was running in the session -- which is a bad
 foundation for something meant to "just work," so it's gone.
 
 Config (button mappings, pointer settings) is stored per remote (by
-Bluetooth address) under `/etc/wii_control/`, since the daemon always runs
-as root regardless of how it was launched.
+Bluetooth address) under `~/.config/wii_control/`.
 
 ## Running it
 
-### AppImage (recommended)
+### .deb (recommended, Debian/Ubuntu/Mint)
+
+```
+packaging/build-deb.sh
+sudo apt install ./packaging/wii-control_0.1.0_all.deb
+wii-control
+```
+
+The install itself (which already runs as root) applies everything the
+daemon needs: a udev rule giving the logged-in desktop user access to
+`/dev/uinput` (via `uaccess`, so no group membership or logout), and
+`setcap` on `hcitool`/`hciconfig`. An apt hook re-applies the `setcap`
+after `bluez` upgrades, which would otherwise silently drop it. There is
+no separate permission script to run and no password prompt from the app.
+
+### AppImage (no install step, but needs a one-time setup)
 
 ```
 packaging/build-appimage.sh

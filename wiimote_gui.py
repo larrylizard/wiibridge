@@ -28,7 +28,23 @@ from wiimote_bridge import INPUT_NAMES, SOCK_PATH
 
 MAX_SLOTS = 4
 
-SETUP_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "setup-permissions.sh")
+def _stage_setup_script():
+    """Root can't read files inside the AppImage's FUSE mount (it's
+    mounted for the launching user only), so sudo/pkexec on the script's
+    in-mount path fails with "Permission denied". Copy it to an ordinary
+    location first and point everything at the copy."""
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "setup-permissions.sh")
+    dest_dir = os.path.expanduser("~/.cache/wii-control")
+    dest = os.path.join(dest_dir, "setup-permissions.sh")
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        shutil.copy2(src, dest)
+        return dest
+    except OSError:
+        return src
+
+
+SETUP_SCRIPT = _stage_setup_script()
 
 
 def _daemon_reachable():
@@ -86,6 +102,23 @@ def ensure_daemon_running():
 
     interpreter, bridge_path = _resolve_runtime()
     cmd = f"{shlex.quote(interpreter)} {shlex.quote(bridge_path)}"
+
+    # Plain launch first: when installed from the .deb, the udev rule's
+    # uaccess ACL already lets this user open /dev/uinput. (sg below would
+    # ask for a group password if the user isn't actually in "input".)
+    try:
+        direct_log = open("/tmp/wiimote_bridge.log", "a")
+        proc = subprocess.Popen([interpreter, bridge_path], stdout=direct_log,
+                                stderr=direct_log, start_new_session=True)
+        for _ in range(20):
+            time.sleep(0.1)
+            if _daemon_reachable():
+                return True
+            if proc.poll() is not None:
+                break
+    except OSError:
+        pass
+
     try:
         log_file = open("/tmp/wiimote_bridge.log", "a")
         subprocess.Popen(

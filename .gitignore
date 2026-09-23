@@ -10,3 +10,5 @@ packaging/appimagetool.AppImage
 packaging/*.AppImage
 packaging/AppDir/usr/bin/
 packaging/AppDir/usr/python/
+packaging/*.deb
+packaging/build-deb/

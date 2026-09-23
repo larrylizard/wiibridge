@@ -21,7 +21,9 @@ via wiimote_gui.py) to either a gamepad button (BTN_*) or a keyboard key
 (KEY_*). A local Unix socket (SOCK_PATH) broadcasts live button state and
 the current mapping for the GUI, and accepts mapping changes from it.
 
-Requires root (raw Bluetooth sockets + /dev/uinput).
+Runs as the desktop user: needs write access to /dev/uinput and
+CAP_NET_RAW/CAP_NET_ADMIN on hcitool/hciconfig, both granted by the .deb
+(or packaging/setup-permissions.sh for the AppImage).
 """
 
 import json
@@ -44,11 +46,9 @@ STALE_TIMEOUT = 5.0        # seconds without any report before treating a remote
 WATCHDOG_INTERVAL = 2.0
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# Config lives under /etc, not next to the script: the daemon always runs
-# as root regardless of who launched it (systemd, sudo, or an AppImage's
-# pkexec), and an AppImage's own directory is a read-only mount at runtime
-# so it can't hold writable state anyway.
-CONFIG_DIR = "/etc/wii_control"
+# Per-user config: the daemon runs as the desktop user (not root), and an
+# AppImage's own directory is a read-only mount, so neither can hold it.
+CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "wii_control")
 MAPPING_PATH = os.path.join(CONFIG_DIR, "mapping.json")
 POINTER_PATH = os.path.join(CONFIG_DIR, "pointer.json")
 SOCK_PATH = "/tmp/wiimote_bridge.sock"
@@ -775,6 +775,11 @@ def watchdog():
 
 
 def main():
+    if not os.access("/dev/uinput", os.W_OK):
+        raise SystemExit(
+            "No write access to /dev/uinput -- install the .deb, or run "
+            "packaging/setup-permissions.sh once. Exiting."
+        )
     os.makedirs(CONFIG_DIR, exist_ok=True)
     mapping = Mapping(MAPPING_PATH)
     pointer_cfg = PointerConfig(POINTER_PATH)
