@@ -26,7 +26,7 @@ CAP_NET_RAW/CAP_NET_ADMIN on hcitool/hciconfig, both granted by the .deb
 (or packaging/setup-permissions.sh for the AppImage).
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 import atexit
 import collections

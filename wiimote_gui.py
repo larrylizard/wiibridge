@@ -277,13 +277,20 @@ class DeviceColumn:
 
         ptr_row = tk.Frame(self.frame)
         ptr_row.pack(fill="x", pady=(0, 4))
-        self.ptr_var = tk.BooleanVar(value=True)
+        self.ptr_var = tk.BooleanVar(value=False)
         self.ix_var = tk.BooleanVar(value=True)
         self.iy_var = tk.BooleanVar(value=False)
         self._suppress = True
-        tk.Checkbutton(ptr_row, text="Ptr", variable=self.ptr_var, command=self._send_pointer).pack(side="left")
-        tk.Checkbutton(ptr_row, text="iX", variable=self.ix_var, command=self._send_pointer).pack(side="left")
-        tk.Checkbutton(ptr_row, text="iY", variable=self.iy_var, command=self._send_pointer).pack(side="left")
+        self.ptr_checks = [
+            tk.Checkbutton(ptr_row, text="Pointer", variable=self.ptr_var, command=self._send_pointer),
+            tk.Checkbutton(ptr_row, text="Flip X", variable=self.ix_var, command=self._send_pointer),
+            tk.Checkbutton(ptr_row, text="Flip Y", variable=self.iy_var, command=self._send_pointer),
+        ]
+        for c in self.ptr_checks:
+            c.config(state="disabled")
+        self.ptr_checks[0].pack(side="top", anchor="w")
+        self.ptr_checks[1].pack(side="left")
+        self.ptr_checks[2].pack(side="left")
         self._suppress = False
 
         self.row_buttons = {}
@@ -305,6 +312,8 @@ class DeviceColumn:
         state = "normal" if addr else "disabled"
         for w in self.row_buttons.values():
             w.config(state=state, bg="#444444")
+        for c in self.ptr_checks:
+            c.config(state=state)
 
     def set_mapping(self, mapping):
         self.mapping = mapping
@@ -314,7 +323,7 @@ class DeviceColumn:
 
     def set_pointer_config(self, cfg):
         self._suppress = True
-        self.ptr_var.set(cfg.get("enabled", True))
+        self.ptr_var.set(cfg.get("enabled", False))
         self.ix_var.set(cfg.get("invert_x", True))
         self.iy_var.set(cfg.get("invert_y", False))
         self._suppress = False
@@ -347,6 +356,8 @@ class GuiApp:
         self.msg_queue = queue.Queue()
         self.slots = []          # list[DeviceColumn], fixed size MAX_SLOTS
         self.slot_of_addr = {}   # addr -> slot index
+        self.mappings = {}       # addr -> latest mapping message
+        self.pointers = {}       # addr -> latest pointer config
 
         self.bridge_thread = None
 
@@ -414,6 +425,11 @@ class GuiApp:
         self.adapters_tree.column("count", width=70, anchor="center")
         self.adapters_tree.column("devices", width=280)
         self.adapters_tree.pack(fill="x", padx=10, pady=(0, 8))
+        tk.Label(parent, justify="left", anchor="w", wraplength=520,
+                 text="Pointer: use the remote's IR camera to move the mouse. "
+                      "Flip X / Flip Y: reverse the horizontal / vertical pointer direction "
+                      "if it moves the wrong way (Flip X is on by default because the camera "
+                      "sees the IR source mirrored).").pack(anchor="w", padx=10, pady=(0, 8))
 
         tk.Button(parent, text="Search for Adapters", command=self._refresh_adapters).pack(anchor="w", padx=10, pady=(0, 10))
 
@@ -549,13 +565,15 @@ class GuiApp:
         if t == "devices":
             self._sync_slots(msg.get("addrs", []), msg.get("slots", {}))
         elif t == "mapping":
+            self.mappings[msg.get("addr")] = msg.get("mapping", {})
             col = self._slot_for(msg.get("addr"))
             if col:
-                col.set_mapping(msg.get("mapping", {}))
+                col.set_mapping(self.mappings[msg.get("addr")])
         elif t == "pointer":
+            self.pointers[msg.get("addr")] = msg.get("config", {})
             col = self._slot_for(msg.get("addr"))
             if col:
-                col.set_pointer_config(msg.get("config", {}))
+                col.set_pointer_config(self.pointers[msg.get("addr")])
         elif t == "state":
             col = self._slot_for(msg.get("addr"))
             if col:
@@ -600,6 +618,11 @@ class GuiApp:
                     self.slots[other_idx].bind_addr(None)
             self.slot_of_addr[addr] = idx
             self.slots[idx].bind_addr(addr)
+            # Config messages may have arrived before the slot was bound.
+            if addr in self.mappings:
+                self.slots[idx].set_mapping(self.mappings[addr])
+            if addr in self.pointers:
+                self.slots[idx].set_pointer_config(self.pointers[addr])
 
     def send(self, obj):
         try:
