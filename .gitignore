@@ -9,3 +9,4 @@ pointer.json
 packaging/appimagetool.AppImage
 packaging/*.AppImage
 packaging/AppDir/usr/bin/*.py
+packaging/AppDir/usr/python/

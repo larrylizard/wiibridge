@@ -16,6 +16,7 @@ import os
 import queue
 import socket
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -44,7 +45,11 @@ def ensure_daemon_running():
     try:
         log_file = open("/tmp/wiimote_bridge.log", "a")
         subprocess.Popen(
-            ["pkexec", "python3", bridge_path],
+            # sys.executable is this same interpreter -- the AppImage's
+            # bundled Python when run from there, so the daemon always
+            # gets the one with evdev installed, regardless of the host's
+            # own python3 (or lack of one with evdev).
+            ["pkexec", sys.executable, bridge_path],
             stdout=log_file, stderr=log_file,
             start_new_session=True,
         )

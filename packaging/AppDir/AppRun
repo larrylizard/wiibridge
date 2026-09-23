@@ -1,6 +1,11 @@
 #!/bin/bash
-# Launches the Wii Remote Control GUI. The GUI itself launches the
-# privileged daemon (wiimote_bridge.py) on demand via pkexec if it isn't
-# already running -- see wiimote_gui.py's ensure_daemon_running().
+# Launches the Wii Remote Control GUI using the bundled Python interpreter
+# (usr/python), so the AppImage doesn't depend on the host having
+# python3-evdev or any particular Python version installed. The GUI
+# itself launches the privileged daemon (wiimote_bridge.py) on demand via
+# pkexec if it isn't already running -- see wiimote_gui.py's
+# ensure_daemon_running(), which uses sys.executable (this same bundled
+# interpreter) for that, not a bare "python3" that pkexec might resolve
+# to something else entirely.
 HERE="$(dirname "$(readlink -f "${0}")")"
-exec python3 "$HERE/usr/bin/wiimote_gui.py" "$@"
+exec "$HERE/usr/python/bin/python3" "$HERE/usr/bin/wiimote_gui.py" "$@"

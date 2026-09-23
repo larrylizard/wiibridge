@@ -55,8 +55,14 @@ packaging/build-appimage.sh
 packaging/Wii-Remote-Control-x86_64.AppImage
 ```
 
-The GUI launches; if the daemon isn't already running it prompts for your
-password via `pkexec` to start it. No separate install step needed.
+Fully self-contained: it bundles its own Python interpreter with `evdev`
+and Tkinter already installed, so it doesn't depend on what's on the
+host's system Python (the first build downloads that portable interpreter
+and caches it in `packaging/AppDir/usr/python/`, ~95MB uncompressed,
+~27MB in the built AppImage). The GUI launches; if the daemon isn't
+already running it prompts for your password via `pkexec` to start it,
+using that same bundled interpreter. No separate install step needed
+beyond `bluez` and `pkexec` being present on the host (see Requirements).
 
 ### Manual / systemd (alternative, e.g. headless setups)
 
@@ -87,10 +93,16 @@ as needed.
 
 ## Requirements
 
+For the AppImage:
 - `bluez` (`hcitool`, `hciconfig`, `bluetoothd`)
+- `pkexec` (part of polkit), for the on-demand daemon launch
+- A C compiler (`gcc`) is needed once, on whichever machine *builds* the
+  AppImage, to compile `evdev`'s native extension into the bundled
+  interpreter -- not needed on machines that just run the built AppImage.
+
+For the manual/systemd path (not the AppImage, which bundles these):
 - `python3-evdev`
-- Python's Tkinter (`python3-tk`) for the GUI
-- `pkexec` (part of polkit) for the AppImage's on-demand daemon launch
+- Python's Tkinter (`python3-tk`)
 
 ## Known issue
 
