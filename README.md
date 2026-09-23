@@ -57,7 +57,7 @@ for the sake of those two things, the setup grants them
 narrowly, once:
 - a udev rule with `uaccess` for `/dev/uinput`, giving the logged-in desktop
   user an ACL (no group membership or logout needed)
-- `cap_net_raw`/`cap_net_admin` via `setcap` on the `hcitool`/`hciconfig`
+- `cap_net_raw`/`cap_net_admin` via `setcap` on the `hcitool`/`hciconfig`/`btmon`
   binaries themselves, which the daemon just shells out to
 
 An earlier version of this launched the daemon via `pkexec` on every run
@@ -82,7 +82,7 @@ wii-control
 The install itself (which already runs as root) applies everything the
 daemon needs: a udev rule giving the logged-in desktop user access to
 `/dev/uinput` (via `uaccess`, so no group membership or logout), and
-`setcap` on `hcitool`/`hciconfig`. An apt hook re-applies the `setcap`
+`setcap` on `hcitool`/`hciconfig`/`btmon`. An apt hook re-applies the `setcap`
 after `bluez` upgrades, which would otherwise silently drop it. There is
 no separate permission script to run and no password prompt from the app.
 
@@ -156,7 +156,24 @@ environment the drawn cursor icon didn't visually follow. Suspected to be
 a virtual-display cursor-plane quirk specific to that VM rather than a
 bug in the input device itself; needs confirming on real hardware.
 
+## How remotes are found (and why not `hcitool inq`)
+
+On the host that exposed this (kernel 7.0), neither `hcitool inq --iac=liac`
+nor the kernel's own "limited discovery" (`btmgmt find -l`) actually sends
+the limited inquiry Wii remotes answer -- both end up as a general scan,
+so the remote is never heard even though everything looks healthy. Sending
+the identical Inquiry as a raw HCI command works immediately (verified with
+a capture on that host: the remote answered within 21 ms and kept
+answering; a general-only device did not answer; a scan on an unused
+address heard nothing). So the app sends the raw command with
+`hcitool cmd 0x01 0x0001 0x00 0x8b 0x9e <len> 0x00` and reads the Inquiry
+Result events from `btmon`. Both need `CAP_NET_RAW`, which the one-time
+setup grants. Where `btmon` isn't installed, the app falls back to the
+older `hcitool inq` method and the check below.
+
 ## Troubleshooting: "answers every scan as a general scan"
+
+(Only relevant to the fallback method.)
 
 The app checks each Bluetooth adapter by scanning with an inquiry access
 code that no device answers. If any device turns up, that adapter (or its

@@ -41,7 +41,7 @@ EOF
 # package replaces those binaries and silently drops them.
 cat > "$STAGE/usr/lib/wii-control/fix-caps.sh" <<'EOF'
 #!/bin/sh
-for b in hcitool hciconfig; do
+for b in hcitool hciconfig btmon; do
     p=$(command -v $b) && setcap cap_net_raw,cap_net_admin+eip "$p"
 done
 exit 0
@@ -76,7 +76,7 @@ EOF
 cat > "$STAGE/DEBIAN/postrm" <<'EOF'
 #!/bin/sh
 if [ "$1" = remove ] || [ "$1" = purge ]; then
-    for b in hcitool hciconfig; do
+    for b in hcitool hciconfig btmon; do
         p=$(command -v $b) && setcap -r "$p" 2>/dev/null || true
     done
     udevadm control --reload-rules 2>/dev/null || true

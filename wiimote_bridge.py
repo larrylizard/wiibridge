@@ -26,9 +26,10 @@ CAP_NET_RAW/CAP_NET_ADMIN on hcitool/hciconfig, both granted by the .deb
 (or packaging/setup-permissions.sh for the AppImage).
 """
 
-__version__ = "0.2.4"
+__version__ = "0.3.0"
 
 import atexit
+import collections
 import ctypes
 import errno
 import fcntl
@@ -294,6 +295,15 @@ def missing_permissions():
             os.getxattr(path, "security.capability")
         except OSError:
             missing.append(f"the Bluetooth scan capability on {tool}")
+    # btmon is what the raw scan reads its results from; it's optional (the
+    # older scan method is the fallback), but if it's installed it needs the
+    # capability too or the raw method can't be used.
+    btmon = shutil.which("btmon")
+    if btmon:
+        try:
+            os.getxattr(btmon, "security.capability")
+        except OSError:
+            missing.append("the Bluetooth monitor capability on btmon")
     return missing
 
 
@@ -412,6 +422,9 @@ def diagnostics():
         except OSError:
             cap = False
         out.append(f"{tool}: {path or 'NOT INSTALLED'}  scan capability: {cap}")
+    btmon = shutil.which("btmon")
+    out.append(f"btmon: {btmon or 'not installed'}  raw-scan capability: {raw_inquiry_available()}  "
+               f"=> scan method: {'raw HCI inquiry via btmon' if raw_inquiry_available() else 'hcitool inq (fallback)'}")
     out += ["", "missing permissions: " + (", ".join(missing_permissions()) or "none"), "",
             "--- hciconfig -a ---", run(["hciconfig", "-a"]), "",
             "--- rfkill ---", run(["rfkill", "list", "bluetooth"]), "",
@@ -421,7 +434,8 @@ def diagnostics():
     if not SCAN_STATS:
         out.append("no completed scans yet")
     for hci, st in SCAN_STATS.items():
-        out.append(f"{hci}: {st['passes']} remote-style (LIAC) scans, last at {st.get('last_time')}, "
+        out.append(f"{hci}: {st['passes']} remote-style (LIAC) scans via {st.get('mode', 'hcitool inq (kernel inquiry ioctl)')}, "
+                   f"last at {st.get('last_time')}, "
                    f"hcitool exit {st.get('last_rc')}, output: {st.get('last_out')!r} {st.get('last_err') or ''}")
         out.append("   devices heard by those scans: " + (", ".join(
             f"{a} class 0x{c:06x}" for a, c in st["heard"].items()) or "none"))
@@ -434,6 +448,195 @@ def diagnostics():
                    + ("heard nothing" if st["control_time"] and not ctl else
                       ", ".join(f"{a} class 0x{c:06x}" for a, c in ctl.items()) or "-"))
     return "\n".join(out)
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+ADDR_LINE_RE = re.compile(r"^\s+Address:\s+([0-9A-Fa-f:]{17})")
+CLASS_LINE_RE = re.compile(r"^\s+Class:\s+0x([0-9A-Fa-f]{6})")
+BTMON_LIFETIME = 45  # seconds before a btmon is recycled; `timeout` below guarantees it can't outlive us for long
+
+
+class RawInquiry:
+    """Remote-style (LIAC) scan sent straight to the adapter as a raw HCI
+    command, with the results read from btmon.
+
+    Why not just `hcitool inq --iac=liac`: on some hosts (seen on kernel
+    7.0) neither that nor the kernel's own "limited discovery" actually
+    sends the limited inquiry -- both end up as a general scan, which Wii
+    remotes never answer -- while the same command sent as a raw HCI
+    Inquiry works instantly. Raw commands need CAP_NET_RAW (hcitool has
+    it), and hcitool cmd only prints the command status, so the Inquiry
+    Result events are read from btmon's decoded output (which needs the
+    same capability)."""
+
+    def __init__(self, hci_name):
+        self.hci = hci_name
+        self.proc = None
+        self.started = 0.0
+        self.lock = threading.Lock()
+        self.recent = []                      # (time, addr, class)
+        self.complete = threading.Event()
+        self.tail = collections.deque(maxlen=5)
+        self._in_result = False
+        self._pending = None
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def start(self):
+        self.stop()
+        master, slave = os.openpty()  # a tty makes btmon flush per line instead of in blocks
+        try:
+            self.proc = subprocess.Popen(
+                ["timeout", str(BTMON_LIFETIME + 15), "btmon", "-i", self.hci],
+                stdin=subprocess.DEVNULL, stdout=slave, stderr=slave,
+                close_fds=True, start_new_session=True)
+        finally:
+            os.close(slave)
+        self.started = time.time()
+        threading.Thread(target=self._read, args=(master,), daemon=True).start()
+
+    def stop(self):
+        if self.proc is not None:
+            try:
+                self.proc.terminate()
+            except OSError:
+                pass
+            self.proc = None
+
+    def _read(self, fd):
+        buf = ""
+        try:
+            while True:
+                data = os.read(fd, 4096)
+                if not data:
+                    break
+                buf += ANSI_RE.sub("", data.decode("utf-8", "replace")).replace("\r", "")
+                *lines, buf = buf.split("\n")
+                for line in lines:
+                    self._line(line)
+        except OSError:
+            pass
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def _line(self, line):
+        if not line.strip():
+            return
+        self.tail.append(line.strip())
+        if not line[0].isspace():  # unindented = header of a new packet
+            self._in_result = "Inquiry Result" in line
+            self._pending = None
+            if "Inquiry Complete" in line:
+                self.complete.set()
+            return
+        if not self._in_result:
+            return
+        m = ADDR_LINE_RE.match(line)
+        if m:
+            self._pending = m.group(1).upper()
+            return
+        m = CLASS_LINE_RE.match(line)
+        if m and self._pending:
+            with self.lock:
+                self.recent.append((time.time(), self._pending, int(m.group(1), 16)))
+            self._pending = None
+
+    def scan(self, seconds):
+        """One inquiry. Returns (addresses of remote-class devices heard,
+        error string or "")."""
+        if not self.alive() or time.time() - self.started > BTMON_LIFETIME:
+            self.start()
+            time.sleep(0.6)  # let btmon attach before the scan starts
+            if not self.alive():
+                return set(), f"{self.hci}: btmon exited: " + " | ".join(self.tail)
+        length = max(1, int(seconds / 1.28))
+        t0 = time.time()
+        self.complete.clear()
+        try:
+            res = subprocess.run(
+                ["hcitool", "-i", self.hci, "cmd", "0x01", "0x0001", "0x00", "0x8b", "0x9e",
+                 f"0x{length:02x}", "0x00"],
+                capture_output=True, text=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            return set(), f"{self.hci}: raw scan command timed out"
+        except FileNotFoundError:
+            return set(), "hcitool not found (is bluez installed?)"
+        if res.returncode != 0:
+            detail = (res.stderr or res.stdout).strip().splitlines()
+            return set(), f"{self.hci}: {detail[-1] if detail else f'raw scan failed (exit {res.returncode})'}"
+
+        self.complete.wait(length * 1.28 + 3)
+        time.sleep(0.3)  # let the last events finish parsing
+
+        st = SCAN_STATS.setdefault(self.hci, {"passes": 0, "heard": {}, "control": {}, "control_time": None})
+        with self.lock:
+            seen = [(a, c) for (t, a, c) in self.recent if t >= t0]
+            self.recent = [r for r in self.recent if r[0] >= t0]
+        st.update(mode="raw HCI inquiry via btmon", last_time=time.strftime("%H:%M:%S"), last_rc=res.returncode,
+                  last_out=f"{len(seen)} result(s)", last_err="")
+        st["passes"] += 1
+
+        found = set()
+        for addr, cod in seen:
+            accepted = ((cod >> 8) & 0x1F) == 0x05
+            if addr not in st["heard"]:
+                log(f"{self.hci}: heard {addr} class 0x{cod:06x} -- "
+                    + ("looks like a remote" if accepted else "IGNORED, not a Peripheral-class device"))
+            st["heard"][addr] = cod
+            if accepted:
+                found.add(addr)
+        return found, ""
+
+
+RAW_SCANNERS = {}
+atexit.register(lambda: [s.stop() for s in RAW_SCANNERS.values()])
+
+
+def raw_inquiry_available():
+    """btmon present AND allowed to open the monitor channel."""
+    path = shutil.which("btmon")
+    if not path:
+        return False
+    try:
+        os.getxattr(path, "security.capability")
+        return True
+    except OSError:
+        return False
+
+
+def scan_adapter(hci_name):
+    """One discovery pass on an adapter, by the best available method.
+    Returns (addresses, error)."""
+    if raw_inquiry_available():
+        scanner = RAW_SCANNERS.setdefault(hci_name, RawInquiry(hci_name))
+        found, err = scanner.scan(SCAN_LENGTH * 1.28)
+        n = SCAN_STATS.get(hci_name, {}).get("passes", 0)
+        if not err and n % 6 == 1:
+            log(f"scanning on {hci_name} (raw HCI inquiry): pass {n}, remotes heard so far: "
+                f"{sum(1 for c in SCAN_STATS[hci_name]['heard'].values() if ((c >> 8) & 0x1F) == 5)}")
+        return found, err
+
+    # Fallback: the kernel's inquiry ioctl via hcitool. Wii remotes need the
+    # limited inquiry, which some kernels never actually send, so an adapter
+    # that ignores the requested scan type is detected and reported.
+    if hci_name in LAP_IGNORED:
+        return set(), LAP_IGNORED_MESSAGE.format(hci=hci_name)
+    found, err = discover_candidates(hci_name)
+    if not err:
+        n = SCAN_STATS[hci_name]["passes"]
+        if n == 1 or n % 5 == 0:
+            control_scan(hci_name)
+            lap_test(hci_name)
+            if hci_name in LAP_IGNORED:
+                return set(), LAP_IGNORED_MESSAGE.format(hci=hci_name)
+        if n % 6 == 1:
+            log(f"scanning on {hci_name}: pass {n}, remotes heard so far: "
+                f"{sum(1 for c in SCAN_STATS[hci_name]['heard'].values() if ((c >> 8) & 0x1F) == 5)}")
+    return found, err
 
 
 SCAN_ERROR = {"text": ""}
@@ -1053,22 +1256,9 @@ def serve():
         adapters = list_adapters()
         scan_errors = []
         for hci_name, local_addr in adapters:
-            if hci_name in LAP_IGNORED:
-                scan_errors.append(LAP_IGNORED_MESSAGE.format(hci=hci_name))
-                continue
-            found, err = discover_candidates(hci_name)
+            found, err = scan_adapter(hci_name)
             if err:
                 scan_errors.append(err)
-            else:
-                n = SCAN_STATS[hci_name]["passes"]
-                if n == 1 or n % 5 == 0:
-                    control_scan(hci_name)
-                    lap_test(hci_name)
-                    if hci_name in LAP_IGNORED:
-                        continue
-                if n % 6 == 1:
-                    log(f"scanning on {hci_name}: pass {n}, remotes heard so far: "
-                        f"{sum(1 for c in SCAN_STATS[hci_name]['heard'].values() if ((c >> 8) & 0x1F) == 5)}")
             for addr in found:
                 if addr in active:
                     continue

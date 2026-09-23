@@ -9,6 +9,7 @@
 #   - Raw HCI operations (the LIAC inquiry scan) need CAP_NET_RAW /
 #     CAP_NET_ADMIN. Rather than running the daemon as root, grant those
 #     to hcitool/hciconfig, which the daemon shells out to.
+#   - btmon gets the same, to read the raw scan's results.
 #   - Bluetooth L2CAP data sockets need no privilege at all on Linux.
 set -euo pipefail
 
@@ -26,5 +27,11 @@ udevadm trigger --name-match=uinput
 for b in hcitool hciconfig; do
     setcap cap_net_raw,cap_net_admin+eip "$(command -v "$b")"
 done
+# btmon reads the results of the raw remote scan (see RawInquiry in
+# wiimote_bridge.py). Optional: without it the app falls back to an older
+# scan method that some kernels can't do correctly.
+if command -v btmon >/dev/null 2>&1; then
+    setcap cap_net_raw,cap_net_admin+eip "$(command -v btmon)"
+fi
 
 echo "Done."
