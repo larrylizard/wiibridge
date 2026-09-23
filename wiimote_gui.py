@@ -11,6 +11,7 @@ Changes take effect live -- the daemon rebuilds its virtual input device
 for that remote immediately.
 """
 
+import filecmp
 import json
 import os
 import queue
@@ -78,9 +79,16 @@ def _resolve_runtime():
         os.makedirs(cache_dir, exist_ok=True)
         shutil.copytree(os.path.join(here, "..", "python"), os.path.join(cache_dir, "python"),
                          symlinks=True, dirs_exist_ok=True)
-        shutil.copy2(os.path.join(here, "wiimote_bridge.py"), cache_dir)
         with open(marker, "w") as f:
             f.write("ok")
+    # The interpreter above is copied once (it's ~90MB and doesn't change),
+    # but the daemon script must track this AppImage's version: trusting a
+    # one-time copy meant an upgraded AppImage silently kept running the
+    # old daemon out of the cache.
+    src_bridge = os.path.join(here, "wiimote_bridge.py")
+    dest_bridge = os.path.join(cache_dir, "wiimote_bridge.py")
+    if not (os.path.exists(dest_bridge) and filecmp.cmp(src_bridge, dest_bridge, shallow=False)):
+        shutil.copy2(src_bridge, dest_bridge)
     return os.path.join(cache_dir, "python", "bin", "python3"), os.path.join(cache_dir, "wiimote_bridge.py")
 
 
@@ -106,6 +114,15 @@ def ensure_daemon_running():
         if proc.poll() is not None:
             return False
     return False
+
+
+def _daemon_log_tail():
+    try:
+        with open("/tmp/wiimote_bridge.log") as f:
+            lines = [ln.strip() for ln in f.read().splitlines() if ln.strip()]
+        return lines[-1] if lines else ""
+    except OSError:
+        return ""
 
 
 def request_permission_grant():
@@ -418,7 +435,8 @@ class GuiApp:
             ok, msg = request_permission_grant()
             if ok:
                 ok = ensure_daemon_running()
-                msg = "" if ok else "Permission granted, but the daemon still didn't start (see /tmp/wiimote_bridge.log)."
+                msg = "" if ok else ("Permission granted, but the daemon still didn't start:\n"
+                                     + (_daemon_log_tail() or "no output (see /tmp/wiimote_bridge.log)"))
             self.msg_queue.put(("grant_result", (ok, msg)))
 
         threading.Thread(target=work, daemon=True).start()
