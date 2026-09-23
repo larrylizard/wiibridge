@@ -26,8 +26,10 @@ CAP_NET_RAW/CAP_NET_ADMIN on hcitool/hciconfig, both granted by the .deb
 (or packaging/setup-permissions.sh for the AppImage).
 """
 
+import atexit
 import ctypes
 import errno
+import fcntl
 import json
 import os
 import re
@@ -279,6 +281,28 @@ def open_l2cap(local_addr, remote_addr, psm, timeout=5.0):
     return sock
 
 
+_LOCK_FD = None
+
+
+def acquire_single_instance():
+    """True if this is the only instance running. A flock is released by the
+    kernel whenever the process dies, however it dies, so a crash or kill -9
+    can never leave a stale lock behind (unlike a pid file). Held for the
+    life of the process; the GUI and the standalone daemon share it, so they
+    can't both grab the adapters either."""
+    global _LOCK_FD
+    base = os.environ.get("XDG_RUNTIME_DIR") or os.path.expanduser("~/.cache")
+    os.makedirs(base, exist_ok=True)
+    fd = os.open(os.path.join(base, "wii-control.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return False
+    _LOCK_FD = fd
+    return True
+
+
 SCAN_ERROR = {"text": ""}
 
 
@@ -399,6 +423,7 @@ class IPCServer(threading.Thread):
             )
         self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.srv.bind(sock_path)
+        atexit.register(lambda: os.path.exists(sock_path) and os.unlink(sock_path))
         os.chmod(sock_path, 0o666)
         self.srv.listen(8)
 
@@ -871,13 +896,12 @@ def watchdog():
             wm.force_disconnect()
 
 
-def main():
-    missing = missing_permissions()
-    if missing:
-        raise SystemExit(
-            "Missing permissions: " + "; ".join(missing) + ". Install the .deb, "
-            "or use the app's Grant permission button (packaging/setup-permissions.sh)."
-        )
+def serve():
+    """Run the bridge until the process exits. Callers must already have
+    checked permissions and the single-instance lock. Runs inside the GUI
+    process, so it lives and dies with the window: closing the app drops
+    every remote and removes the virtual devices, and there is no separate
+    long-lived service to go stale or get left running."""
     os.makedirs(CONFIG_DIR, exist_ok=True)
     mapping = Mapping(MAPPING_PATH)
     pointer_cfg = PointerConfig(POINTER_PATH)
@@ -916,6 +940,16 @@ def main():
             set_scan_error(ipc, "")
 
         time.sleep(SCAN_INTERVAL)
+
+
+def main():
+    """Standalone/headless entry point (no GUI)."""
+    missing = missing_permissions()
+    if missing:
+        raise SystemExit("Missing permissions: " + "; ".join(missing) + ". Install the .deb, or run packaging/setup-permissions.sh.")
+    if not acquire_single_instance():
+        raise SystemExit("Wii Remote Control is already running.")
+    serve()
 
 
 if __name__ == "__main__":

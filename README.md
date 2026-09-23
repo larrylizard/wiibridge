@@ -39,9 +39,14 @@ Dolphin is not involved anywhere in this pipeline.
 - **`wiimote_gui.py`** -- a Tkinter GUI. Shows up to 4 connected remotes
   side by side, each with live button state, independent remapping, IR
   pointer controls, and a Settings tab listing detected Bluetooth
-  adapters. Talks to the daemon over a local Unix socket
-  (`/tmp/wiimote_bridge.sock`) and launches it on demand if it isn't
-  already running.
+  adapters. It runs the daemon **inside the same process**, so the service
+  only exists while the window is open: closing the app disconnects every
+  remote and removes the virtual devices, and nothing is left running in
+  the background. Only one copy can run at a time (an `flock` on
+  `$XDG_RUNTIME_DIR/wii-control.lock`, which the kernel releases however
+  the process dies, so a crash never leaves a stale lock); a second launch
+  just says it's already running. GUI and daemon still talk over a local
+  Unix socket (`/tmp/wiimote_bridge.sock`).
 
 ### Why the daemon doesn't need root
 
@@ -101,7 +106,7 @@ doesn't depend on the host's Python (the first build downloads that
 portable interpreter and caches it in `packaging/AppDir/usr/python/`,
 ~95MB uncompressed, ~27MB in the built AppImage).
 
-### Manual / systemd (alternative, e.g. headless setups)
+### Headless / systemd (optional -- runs with no window, the opposite of the above)
 
 ```
 sudo python3 wiimote_bridge.py          # run directly, or:
@@ -109,7 +114,8 @@ sudo cp packaging/wiimote-bridge.service /etc/systemd/system/
 sudo systemctl enable --now wiimote-bridge.service
 ```
 
-Then run `python3 wiimote_gui.py` as your normal user for the GUI.
+Run it as your own user (not root). Don't run this alongside the GUI: they
+share the single-instance lock, so whichever starts second refuses to start.
 
 ## Connecting a remote
 

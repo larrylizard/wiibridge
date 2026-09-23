@@ -11,19 +11,21 @@ Changes take effect live -- the daemon rebuilds its virtual input device
 for that remote immediately.
 """
 
-import filecmp
 import json
 import os
 import queue
 import shutil
+import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
+import wiimote_bridge as bridge
 from wiimote_bridge import INPUT_NAMES, SOCK_PATH
 
 MAX_SLOTS = 4
@@ -58,71 +60,31 @@ def _daemon_reachable():
         return False
 
 
-def _resolve_runtime():
-    """Returns (interpreter_path, bridge_script_path) to launch the daemon
-    with. When running from inside the AppImage, these get copied out to
-    a persistent, ordinary directory (~/.cache/wii-control/runtime) the
-    first time, rather than used straight from the FUSE mount, which is
-    torn down when the GUI exits and would take the running daemon's
-    files with it. Subsequent launches reuse the cached copy.
-    In dev mode (no bundled interpreter alongside this script) this is a
-    no-op that just returns sys.executable, since there's no FUSE mount
-    involved there anyway."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    bundled_python = os.path.join(here, "..", "python", "bin", "python3")
-    if not os.path.exists(bundled_python):
-        return sys.executable, os.path.join(here, "wiimote_bridge.py")
-
-    cache_dir = os.path.join(os.path.expanduser("~/.cache/wii-control"), "runtime")
-    marker = os.path.join(cache_dir, ".complete")
-    if not os.path.exists(marker):
-        os.makedirs(cache_dir, exist_ok=True)
-        shutil.copytree(os.path.join(here, "..", "python"), os.path.join(cache_dir, "python"),
-                         symlinks=True, dirs_exist_ok=True)
-        with open(marker, "w") as f:
-            f.write("ok")
-    # The interpreter above is copied once (it's ~90MB and doesn't change),
-    # but the daemon script must track this AppImage's version: trusting a
-    # one-time copy meant an upgraded AppImage silently kept running the
-    # old daemon out of the cache.
-    src_bridge = os.path.join(here, "wiimote_bridge.py")
-    dest_bridge = os.path.join(cache_dir, "wiimote_bridge.py")
-    if not (os.path.exists(dest_bridge) and filecmp.cmp(src_bridge, dest_bridge, shallow=False)):
-        shutil.copy2(src_bridge, dest_bridge)
-    return os.path.join(cache_dir, "python", "bin", "python3"), os.path.join(cache_dir, "wiimote_bridge.py")
-
-
-def ensure_daemon_running():
-    """Start the daemon as this user if it isn't already running. It exits
-    immediately if it can't open /dev/uinput (i.e. the one-time permission
-    grant hasn't happened yet), which shows up here as "not reachable".
-    Returns True if the daemon is reachable by the time this returns."""
-    if _daemon_reachable():
-        return True
-    interpreter, bridge_path = _resolve_runtime()
+def stop_leftover_daemon():
+    """A standalone daemon from an older version (or started by hand) would
+    hold the adapters and the socket, so this window couldn't own them. If
+    one is answering on the socket and belongs to this user, stop it."""
     try:
-        log_file = open("/tmp/wiimote_bridge.log", "a")
-        proc = subprocess.Popen([interpreter, bridge_path], stdout=log_file,
-                                stderr=log_file, start_new_session=True)
-    except OSError as ex:
-        print(f"Could not launch wiimote_bridge daemon: {ex}")
-        return False
-    for _ in range(20):  # up to ~2s for it to bind its socket
-        time.sleep(0.1)
-        if _daemon_reachable():
-            return True
-        if proc.poll() is not None:
-            return False
-    return False
-
-
-def _daemon_log_tail():
-    try:
-        with open("/tmp/wiimote_bridge.log") as f:
-            lines = [ln.strip() for ln in f.read().splitlines() if ln.strip()]
-        return lines[-1] if lines else ""
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1)
+        s.connect(SOCK_PATH)
+        pid, uid, _gid = struct.unpack("3i", s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+        s.close()
     except OSError:
-        return ""
+        return
+    if uid != os.getuid() or pid == os.getpid():
+        return
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            if b"wiimote_bridge" not in f.read():
+                return
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    for _ in range(30):  # up to 3s for it to let go of the socket
+        time.sleep(0.1)
+        if not os.path.exists(SOCK_PATH) or not _daemon_reachable():
+            return
 
 
 def request_permission_grant():
@@ -321,9 +283,13 @@ class GuiApp:
         self.slots = []          # list[DeviceColumn], fixed size MAX_SLOTS
         self.slot_of_addr = {}   # addr -> slot index
 
+        self.bridge_thread = None
+
         self._build_ui()
-        if not ensure_daemon_running():
-            self._show_setup()
+        stop_leftover_daemon()
+        ok, msg = self._try_start_bridge()
+        if not ok:
+            self._show_setup(msg)
         threading.Thread(target=self._socket_worker, daemon=True).start()
         self.root.after(50, self._poll_queue)
 
@@ -425,11 +391,29 @@ class GuiApp:
                 self.msg_queue.put(("status", False))
                 time.sleep(2)
 
-    def _show_setup(self):
+    def _try_start_bridge(self):
+        """Runs the bridge in this process (see bridge.serve) once every
+        permission is in place. Returns (ok, why-not)."""
+        missing = bridge.missing_permissions()
+        if missing:
+            return False, "Still missing: " + "; ".join(missing)
+        if self.bridge_thread and self.bridge_thread.is_alive():
+            return True, ""
+
+        def run():
+            try:
+                bridge.serve()
+            except BaseException as ex:  # SystemExit included: it must not vanish silently in a thread
+                self.msg_queue.put(("bridge_failed", str(ex) or type(ex).__name__))
+
+        self.bridge_thread = threading.Thread(target=run, daemon=True)
+        self.bridge_thread.start()
+        return True, ""
+
+    def _show_setup(self, detail=""):
         self.setup_frame.pack(fill="x", padx=8, pady=(8, 2), before=self.status_lbl)
-        detail = _daemon_log_tail()
         if detail:
-            self.setup_detail.config(text=f"Daemon says: {detail}")
+            self.setup_detail.config(text=detail)
             self.setup_detail.pack(anchor="w", pady=(6, 0))
 
     def _on_grant(self):
@@ -440,9 +424,8 @@ class GuiApp:
         def work():
             ok, msg = request_permission_grant()
             if ok:
-                ok = ensure_daemon_running()
-                msg = "" if ok else ("Permission granted, but the daemon still didn't start:\n"
-                                     + (_daemon_log_tail() or "no output (see /tmp/wiimote_bridge.log)"))
+                ok, why = self._try_start_bridge()
+                msg = "" if ok else f"Permission granted, but the service still can't start. {why}"
             self.msg_queue.put(("grant_result", (ok, msg)))
 
         threading.Thread(target=work, daemon=True).start()
@@ -462,6 +445,9 @@ class GuiApp:
                     self._set_connected(payload)
                 elif kind == "grant_result":
                     self._on_grant_result(*payload)
+                elif kind == "bridge_failed":
+                    self.scan_lbl.config(text=f"The service stopped: {payload}")
+                    self.scan_lbl.pack(fill="x", padx=8, after=self.status_lbl)
                 else:
                     self._handle_msg(payload)
         except queue.Empty:
@@ -542,6 +528,17 @@ class GuiApp:
 
 def main():
     root = tk.Tk()
+    if not bridge.acquire_single_instance():
+        root.withdraw()
+        messagebox.showinfo("Already running", "Wii Remote Control is already running.")
+        return
+
+    # Nothing else captures the service's output now that it runs in this
+    # process, so keep it (and any GUI exception) somewhere findable.
+    log_dir = os.path.expanduser("~/.cache/wii-control")
+    os.makedirs(log_dir, exist_ok=True)
+    sys.stdout = sys.stderr = open(os.path.join(log_dir, "app.log"), "w", buffering=1)
+
     GuiApp(root)
     root.mainloop()
 

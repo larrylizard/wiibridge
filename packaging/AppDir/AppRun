@@ -1,8 +1,9 @@
 #!/bin/bash
 # Launches the GUI with the bundled Python (usr/python), so the host needs
-# neither python3-evdev nor any particular Python version. The GUI starts
-# the daemon itself as this user; if it lacks permissions, the GUI shows a
-# button that runs the one-time setup through the system's password dialog.
+# neither python3-evdev nor any particular Python version. The daemon runs
+# inside the GUI process, so it exists only while this app is open. If
+# permissions are missing, the GUI shows a button that runs the one-time
+# setup through the system's password dialog.
 HERE="$(dirname "$(readlink -f "${0}")")"
 export LC_ALL=C.UTF-8 LANG=C.UTF-8
 exec "$HERE/usr/python/bin/python3" "$HERE/usr/bin/wiimote_gui.py" "$@"
