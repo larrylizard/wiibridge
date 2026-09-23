@@ -31,7 +31,7 @@ Dolphin is not involved anywhere in this pipeline.
   them, parses their Bluetooth HID reports, and exposes each one to the
   OS as `uinput` devices (gamepad, keyboard, and optionally an absolute
   IR-pointer device). Runs as a normal user, not root -- see
-  `packaging/setup-permissions.sh` for the one-time setup that makes that
+  the .deb, or the AppImage's one-time setup button, for what makes that
   possible. Supports multiple remotes concurrently, spread across every
   Bluetooth adapter present on the machine (useful if one adapter hits a
   hardware connection-count limit -- some cheap dongles cap out around 2
@@ -48,10 +48,10 @@ Dolphin is not involved anywhere in this pipeline.
 Only `/dev/uinput` and raw HCI operations (the LIAC inquiry scan) need
 elevated privilege -- Bluetooth L2CAP data sockets (the actual connection
 to each remote) need none. Rather than running the whole daemon as root
-for the sake of those two things, `setup-permissions.sh` grants them
+for the sake of those two things, the setup grants them
 narrowly, once:
-- a udev rule + `input` group membership for `/dev/uinput` (the same
-  mechanism many other controller-remapping tools use)
+- a udev rule with `uaccess` for `/dev/uinput`, giving the logged-in desktop
+  user an ACL (no group membership or logout needed)
 - `cap_net_raw`/`cap_net_admin` via `setcap` on the `hcitool`/`hciconfig`
   binaries themselves, which the daemon just shells out to
 
@@ -81,24 +81,25 @@ daemon needs: a udev rule giving the logged-in desktop user access to
 after `bluez` upgrades, which would otherwise silently drop it. There is
 no separate permission script to run and no password prompt from the app.
 
-### AppImage (no install step, but needs a one-time setup)
+### AppImage (no install, self-contained)
 
 ```
 packaging/build-appimage.sh
-
-# one-time, so the daemon can run unprivileged -- see "Why the daemon
-# doesn't need root" above. Log out and back in afterward.
-sudo packaging/AppDir/usr/bin/setup-permissions.sh
-
 packaging/Wii-Remote-Control-x86_64.AppImage
 ```
 
-Fully self-contained: it bundles its own Python interpreter with `evdev`
-and Tkinter already installed, so it doesn't depend on what's on the
-host's system Python (the first build downloads that portable interpreter
-and caches it in `packaging/AppDir/usr/python/`, ~95MB uncompressed,
-~27MB in the built AppImage). If you skip the one-time setup, the app
-still launches and tells you the exact command to run.
+The GUI always opens. The first time on a computer it shows a "One-time
+setup needed" panel with a **Grant permission...** button. Clicking it
+brings up your desktop's own password dialog (via `pkexec`/polkit -- drawn
+by the system, not by this app, which never sees your password) and runs
+`setup-permissions.sh` as root once. After that the app starts with no
+prompts. If the system has no polkit authentication agent, the button
+shows why instead of failing silently.
+
+It bundles its own Python interpreter with `evdev` and Tkinter, so it
+doesn't depend on the host's Python (the first build downloads that
+portable interpreter and caches it in `packaging/AppDir/usr/python/`,
+~95MB uncompressed, ~27MB in the built AppImage).
 
 ### Manual / systemd (alternative, e.g. headless setups)
 
@@ -131,8 +132,7 @@ as needed.
 
 For the AppImage:
 - `bluez` (`hcitool`, `hciconfig`, `bluetoothd`)
-- `setcap`/`usermod`/`udevadm` (standard on any systemd-based distro), for
-  the one-time `setup-permissions.sh` step
+- `pkexec` (polkit) and `setcap`, for the one-time permission button
 - A C compiler (`gcc`) is needed once, on whichever machine *builds* the
   AppImage, to compile `evdev`'s native extension into the bundled
   interpreter -- not needed on machines that just run the built AppImage.

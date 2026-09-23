@@ -14,7 +14,6 @@ for that remote immediately.
 import json
 import os
 import queue
-import shlex
 import shutil
 import socket
 import subprocess
@@ -22,7 +21,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk
 
 from wiimote_bridge import INPUT_NAMES, SOCK_PATH
 
@@ -62,10 +61,9 @@ def _resolve_runtime():
     """Returns (interpreter_path, bridge_script_path) to launch the daemon
     with. When running from inside the AppImage, these get copied out to
     a persistent, ordinary directory (~/.cache/wii-control/runtime) the
-    first time, rather than used straight from the FUSE mount: `sg`
-    (needed below to apply the "input" group without a logout) cannot
-    exec a binary that lives inside that mount at all -- confirmed by
-    testing, not theoretical. Subsequent launches reuse the cached copy.
+    first time, rather than used straight from the FUSE mount, which is
+    torn down when the GUI exits and would take the running daemon's
+    files with it. Subsequent launches reuse the cached copy.
     In dev mode (no bundled interpreter alongside this script) this is a
     no-op that just returns sys.executable, since there's no FUSE mount
     involved there anyway."""
@@ -87,101 +85,58 @@ def _resolve_runtime():
 
 
 def ensure_daemon_running():
-    """The daemon needs /dev/uinput access and raw HCI capability, not
-    full root -- see packaging/setup-permissions.sh, a one-time script
-    that grants those narrowly (udev rule + group for uinput, setcap on
-    hcitool/hciconfig for HCI) so the daemon runs as a normal user with no
-    password prompt on every launch. (An earlier version of this used
-    pkexec on every launch instead; that turned out to fail silently
-    whenever no polkit authentication agent was running in the session,
-    with no error and no prompt, so it's gone.)
-
+    """Start the daemon as this user if it isn't already running. It exits
+    immediately if it can't open /dev/uinput (i.e. the one-time permission
+    grant hasn't happened yet), which shows up here as "not reachable".
     Returns True if the daemon is reachable by the time this returns."""
     if _daemon_reachable():
         return True
-
     interpreter, bridge_path = _resolve_runtime()
-    cmd = f"{shlex.quote(interpreter)} {shlex.quote(bridge_path)}"
-
-    # Plain launch first: when installed from the .deb, the udev rule's
-    # uaccess ACL already lets this user open /dev/uinput. (sg below would
-    # ask for a group password if the user isn't actually in "input".)
-    try:
-        direct_log = open("/tmp/wiimote_bridge.log", "a")
-        proc = subprocess.Popen([interpreter, bridge_path], stdout=direct_log,
-                                stderr=direct_log, start_new_session=True)
-        for _ in range(20):
-            time.sleep(0.1)
-            if _daemon_reachable():
-                return True
-            if proc.poll() is not None:
-                break
-    except OSError:
-        pass
-
     try:
         log_file = open("/tmp/wiimote_bridge.log", "a")
-        subprocess.Popen(
-            # Launched via `sg input` rather than directly: right after
-            # setup-permissions.sh runs, this session's own group
-            # membership hasn't picked up "input" yet (that needs a fresh
-            # login) -- sg applies it to just this process, so the daemon
-            # works immediately without requiring a logout/login at all.
-            ["sg", "input", "-c", cmd],
-            stdout=log_file, stderr=log_file,
-            start_new_session=True,
-        )
+        proc = subprocess.Popen([interpreter, bridge_path], stdout=log_file,
+                                stderr=log_file, start_new_session=True)
     except OSError as ex:
         print(f"Could not launch wiimote_bridge daemon: {ex}")
         return False
-
     for _ in range(20):  # up to ~2s for it to bind its socket
         time.sleep(0.1)
         if _daemon_reachable():
             return True
+        if proc.poll() is not None:
+            return False
     return False
 
 
-TERMINAL_CANDIDATES = [
-    "x-terminal-emulator", "gnome-terminal", "konsole", "xfce4-terminal",
-    "lxterminal", "mate-terminal", "xterm",
-]
-
-
-def try_pkexec_setup():
-    """Best case: a polkit agent is running and shows its own native
-    prompt. Silent/quick failure here (no agent) is expected and handled
-    by the terminal fallback, not treated as an error."""
+def request_permission_grant():
+    """Runs the one-time setup through pkexec, which is the desktop's own
+    native password dialog (drawn by the system, not by this app).
+    Returns (ok, message)."""
+    pkexec = shutil.which("pkexec")
+    if not pkexec:
+        return False, "pkexec (polkit) isn't installed, so there is no system password dialog to use."
     try:
-        subprocess.run(["pkexec", "bash", SETUP_SCRIPT], timeout=20)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-
-
-def launch_terminal_setup():
-    """Fallback when pkexec doesn't produce a working daemon (no agent):
-    open an ordinary terminal running `sudo`. This is intentionally NOT a
-    password field drawn by this app -- a stranger's app asking you to
-    type your password into its own box is exactly the pattern users
-    should distrust. A real terminal's sudo prompt is unambiguous.
-    Returns True if a terminal was actually opened."""
-    for name in TERMINAL_CANDIDATES:
-        term = shutil.which(name)
-        if not term:
-            continue
-        inner = f"sudo bash {shlex.quote(SETUP_SCRIPT)}; echo; read -p 'Press Enter to close...'"
-        try:
-            subprocess.Popen([term, "-e", "bash", "-c", inner])
-            return True
-        except OSError:
-            continue
-    return False
+        r = subprocess.run([pkexec, "bash", SETUP_SCRIPT], capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        return False, "Timed out waiting for the password dialog."
+    except OSError as ex:
+        return False, str(ex)
+    detail = (r.stderr or r.stdout).strip()[-300:]
+    if r.returncode == 0:
+        return True, ""
+    if r.returncode == 126:
+        return False, "Cancelled -- the password dialog was dismissed."
+    if r.returncode == 127:
+        return False, ("Couldn't get authorization. Either the password was wrong, or this desktop "
+                       "session has no polkit authentication agent running, so no system dialog "
+                       "could appear." + (f"\n({detail})" if detail else ""))
+    return False, f"Setup failed (exit {r.returncode}): {detail}"
 
 
 SHORT_NAMES = {
     "A": "A", "B": "B", "ONE": "1", "TWO": "2", "MINUS": "-", "PLUS": "+",
-    "HOME": "Home", "DPAD_UP": "↑", "DPAD_DOWN": "↓",
-    "DPAD_LEFT": "←", "DPAD_RIGHT": "→",
+    "HOME": "Home", "DPAD_UP": "Up", "DPAD_DOWN": "Down",
+    "DPAD_LEFT": "Left", "DPAD_RIGHT": "Right",
 }
 
 GAMEPAD_BUTTONS = [
@@ -215,7 +170,7 @@ def keysym_to_code(keysym):
 
 def fmt_mapping(spec):
     if not spec or spec.get("kind") == "none":
-        return "—"
+        return "-"
     code = spec.get("code", "")
     return code.replace("BTN_", "").replace("KEY_", "").title()
 
@@ -290,7 +245,7 @@ class DeviceColumn:
         self.row_buttons = {}
         for name in INPUT_NAMES:
             btn = tk.Button(
-                self.frame, text=f"{SHORT_NAMES[name]}: —", width=14, anchor="w",
+                self.frame, text=f"{SHORT_NAMES[name]}: -", width=14, anchor="w",
                 bg="#444444", fg="white", relief="flat",
                 command=lambda n=name: self._open_remap(n),
             )
@@ -350,6 +305,8 @@ class GuiApp:
         self.slot_of_addr = {}   # addr -> slot index
 
         self._build_ui()
+        if not ensure_daemon_running():
+            self._show_setup()
         threading.Thread(target=self._socket_worker, daemon=True).start()
         self.root.after(50, self._poll_queue)
 
@@ -361,6 +318,20 @@ class GuiApp:
 
         controllers_tab = tk.Frame(notebook)
         notebook.add(controllers_tab, text="Controllers")
+
+        self.setup_frame = tk.LabelFrame(controllers_tab, text="One-time setup needed", padx=10, pady=8)
+        tk.Label(
+            self.setup_frame, justify="left", wraplength=620,
+            text="Wii Remote Control needs permission to scan for remotes over "
+                 "Bluetooth and to create virtual controllers. Your computer "
+                 "restricts both by default. Click the button to grant it -- "
+                 "your system will ask for your password in its own dialog. "
+                 "This is needed once per computer; after that the app starts "
+                 "with no prompts.",
+        ).pack(anchor="w")
+        self.grant_btn = tk.Button(self.setup_frame, text="Grant permission...", command=self._on_grant)
+        self.grant_btn.pack(anchor="w", pady=(8, 0))
+        self.setup_msg = tk.Label(self.setup_frame, text="", justify="left", wraplength=620, fg="#c62828")
 
         self.status_lbl = tk.Label(controllers_tab, text="Connecting to daemon...", anchor="w")
         self.status_lbl.pack(fill="x", padx=8, pady=(8, 2))
@@ -410,7 +381,7 @@ class GuiApp:
             devices = a.get("devices", [])
             self.adapters_tree.insert(
                 "", "end", text=a.get("hci", "?"), iid=a.get("hci", "?"),
-                values=(a.get("addr", ""), len(devices), ", ".join(devices) or "—"),
+                values=(a.get("addr", ""), len(devices), ", ".join(devices) or "-"),
             )
 
     def _socket_worker(self):
@@ -435,12 +406,38 @@ class GuiApp:
                 self.msg_queue.put(("status", False))
                 time.sleep(2)
 
+    def _show_setup(self):
+        self.setup_frame.pack(fill="x", padx=8, pady=(8, 2), before=self.status_lbl)
+
+    def _on_grant(self):
+        self.grant_btn.config(state="disabled")
+        self.setup_msg.config(text="Waiting for the system password dialog...", fg="#555")
+        self.setup_msg.pack(anchor="w", pady=(6, 0))
+
+        def work():
+            ok, msg = request_permission_grant()
+            if ok:
+                ok = ensure_daemon_running()
+                msg = "" if ok else "Permission granted, but the daemon still didn't start (see /tmp/wiimote_bridge.log)."
+            self.msg_queue.put(("grant_result", (ok, msg)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_grant_result(self, ok, msg):
+        if ok:
+            self.setup_frame.pack_forget()
+            return
+        self.grant_btn.config(state="normal", text="Try again...")
+        self.setup_msg.config(text=msg, fg="#c62828")
+
     def _poll_queue(self):
         try:
             while True:
                 kind, payload = self.msg_queue.get_nowait()
                 if kind == "status":
                     self._set_connected(payload)
+                elif kind == "grant_result":
+                    self._on_grant_result(*payload)
                 else:
                     self._handle_msg(payload)
         except queue.Empty:
@@ -449,10 +446,11 @@ class GuiApp:
 
     def _set_connected(self, connected):
         self.status_lbl.config(
-            text="Connected to wiimote_bridge daemon" if connected else "Daemon not reachable - is it running (systemctl status wiimote-bridge)?",
+            text="Connected to the Wii Remote daemon" if connected else "Daemon not running",
             fg="#2e7d32" if connected else "#c62828",
         )
         if connected:
+            self.setup_frame.pack_forget()
             self._refresh_adapters()
 
     def _handle_msg(self, msg):
@@ -513,32 +511,6 @@ class GuiApp:
 
 def main():
     root = tk.Tk()
-
-    if not ensure_daemon_running():
-        root.withdraw()
-
-        try_pkexec_setup()
-        if ensure_daemon_running():
-            root.deiconify()
-        else:
-            opened = launch_terminal_setup()
-            root.deiconify()
-            if opened:
-                messagebox.showinfo(
-                    "One-time setup",
-                    "A terminal window opened for a one-time permission "
-                    "setup (not needed on future launches). Complete the "
-                    "sudo prompt there, then click OK here.",
-                )
-            else:
-                messagebox.showwarning(
-                    "One-time setup needed",
-                    "Run this once in a terminal, then relaunch this app "
-                    "(not needed on future launches):\n\n"
-                    f"  sudo bash {SETUP_SCRIPT}",
-                )
-            ensure_daemon_running()
-
     GuiApp(root)
     root.mainloop()
 
