@@ -336,8 +336,7 @@ class GuiApp:
         tk.Label(
             parent, fg="#555", justify="left", wraplength=520,
             text="Remotes are automatically spread across every adapter listed here. "
-                 "Plug in another USB Bluetooth dongle and pass it through to the VM, "
-                 "then press Search to pick it up without restarting the daemon.",
+                 "Plug in another USB Bluetooth adapter and press Search to pick it up.",
         ).pack(anchor="w", padx=10, pady=(0, 8))
 
         self.adapters_tree = ttk.Treeview(parent, columns=("addr", "count", "devices"), show="tree headings", height=6)
@@ -352,6 +351,17 @@ class GuiApp:
         self.adapters_tree.pack(fill="x", padx=10, pady=(0, 8))
 
         tk.Button(parent, text="Search for Adapters", command=self._refresh_adapters).pack(anchor="w", padx=10, pady=(0, 10))
+
+        log_path = os.path.expanduser("~/.cache/wii-control/app.log")
+        tk.Label(parent, text="Log file (what the service is doing, and any errors):", anchor="w").pack(anchor="w", padx=10)
+        tk.Label(parent, text=log_path, anchor="w", fg="#555").pack(anchor="w", padx=10)
+
+        def open_log():
+            try:
+                subprocess.Popen(["xdg-open", log_path])
+            except OSError:
+                pass
+        tk.Button(parent, text="Open log", command=open_log).pack(anchor="w", padx=10, pady=(4, 10))
 
     def _maybe_refresh_adapters(self, notebook, settings_tab):
         if notebook.select() == str(settings_tab):
