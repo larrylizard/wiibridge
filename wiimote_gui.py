@@ -14,6 +14,8 @@ for that remote immediately.
 import json
 import os
 import queue
+import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -40,6 +42,34 @@ def _daemon_reachable():
         return False
 
 
+def _resolve_runtime():
+    """Returns (interpreter_path, bridge_script_path) to launch the daemon
+    with. When running from inside the AppImage, these get copied out to
+    a persistent, ordinary directory (~/.cache/wii-control/runtime) the
+    first time, rather than used straight from the FUSE mount: `sg`
+    (needed below to apply the "input" group without a logout) cannot
+    exec a binary that lives inside that mount at all -- confirmed by
+    testing, not theoretical. Subsequent launches reuse the cached copy.
+    In dev mode (no bundled interpreter alongside this script) this is a
+    no-op that just returns sys.executable, since there's no FUSE mount
+    involved there anyway."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    bundled_python = os.path.join(here, "..", "python", "bin", "python3")
+    if not os.path.exists(bundled_python):
+        return sys.executable, os.path.join(here, "wiimote_bridge.py")
+
+    cache_dir = os.path.join(os.path.expanduser("~/.cache/wii-control"), "runtime")
+    marker = os.path.join(cache_dir, ".complete")
+    if not os.path.exists(marker):
+        os.makedirs(cache_dir, exist_ok=True)
+        shutil.copytree(os.path.join(here, "..", "python"), os.path.join(cache_dir, "python"),
+                         symlinks=True, dirs_exist_ok=True)
+        shutil.copy2(os.path.join(here, "wiimote_bridge.py"), cache_dir)
+        with open(marker, "w") as f:
+            f.write("ok")
+    return os.path.join(cache_dir, "python", "bin", "python3"), os.path.join(cache_dir, "wiimote_bridge.py")
+
+
 def ensure_daemon_running():
     """The daemon needs /dev/uinput access and raw HCI capability, not
     full root -- see packaging/setup-permissions.sh, a one-time script
@@ -54,11 +84,17 @@ def ensure_daemon_running():
     if _daemon_reachable():
         return True
 
-    bridge_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wiimote_bridge.py")
+    interpreter, bridge_path = _resolve_runtime()
+    cmd = f"{shlex.quote(interpreter)} {shlex.quote(bridge_path)}"
     try:
         log_file = open("/tmp/wiimote_bridge.log", "a")
         subprocess.Popen(
-            [sys.executable, bridge_path],
+            # Launched via `sg input` rather than directly: right after
+            # setup-permissions.sh runs, this session's own group
+            # membership hasn't picked up "input" yet (that needs a fresh
+            # login) -- sg applies it to just this process, so the daemon
+            # works immediately without requiring a logout/login at all.
+            ["sg", "input", "-c", cmd],
             stdout=log_file, stderr=log_file,
             start_new_session=True,
         )
@@ -70,6 +106,42 @@ def ensure_daemon_running():
         time.sleep(0.1)
         if _daemon_reachable():
             return True
+    return False
+
+
+TERMINAL_CANDIDATES = [
+    "x-terminal-emulator", "gnome-terminal", "konsole", "xfce4-terminal",
+    "lxterminal", "mate-terminal", "xterm",
+]
+
+
+def try_pkexec_setup():
+    """Best case: a polkit agent is running and shows its own native
+    prompt. Silent/quick failure here (no agent) is expected and handled
+    by the terminal fallback, not treated as an error."""
+    try:
+        subprocess.run(["pkexec", "bash", SETUP_SCRIPT], timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def launch_terminal_setup():
+    """Fallback when pkexec doesn't produce a working daemon (no agent):
+    open an ordinary terminal running `sudo`. This is intentionally NOT a
+    password field drawn by this app -- a stranger's app asking you to
+    type your password into its own box is exactly the pattern users
+    should distrust. A real terminal's sudo prompt is unambiguous.
+    Returns True if a terminal was actually opened."""
+    for name in TERMINAL_CANDIDATES:
+        term = shutil.which(name)
+        if not term:
+            continue
+        inner = f"sudo bash {shlex.quote(SETUP_SCRIPT)}; echo; read -p 'Press Enter to close...'"
+        try:
+            subprocess.Popen([term, "-e", "bash", "-c", inner])
+            return True
+        except OSError:
+            continue
     return False
 
 
@@ -407,19 +479,33 @@ class GuiApp:
 
 
 def main():
-    daemon_ok = ensure_daemon_running()
     root = tk.Tk()
-    if not daemon_ok:
+
+    if not ensure_daemon_running():
         root.withdraw()
-        messagebox.showwarning(
-            "One-time setup needed",
-            "The Wii Remote daemon couldn't start. This is normally a "
-            "one-time permissions step, not an error each run:\n\n"
-            f"  sudo {os.path.abspath(SETUP_SCRIPT)}\n\n"
-            "Log out and back in afterward, then relaunch this app. "
-            "(Details: /tmp/wiimote_bridge.log)",
-        )
-        root.deiconify()
+
+        try_pkexec_setup()
+        if ensure_daemon_running():
+            root.deiconify()
+        else:
+            opened = launch_terminal_setup()
+            root.deiconify()
+            if opened:
+                messagebox.showinfo(
+                    "One-time setup",
+                    "A terminal window opened for a one-time permission "
+                    "setup (not needed on future launches). Complete the "
+                    "sudo prompt there, then click OK here.",
+                )
+            else:
+                messagebox.showwarning(
+                    "One-time setup needed",
+                    "Run this once in a terminal, then relaunch this app "
+                    "(not needed on future launches):\n\n"
+                    f"  sudo bash {SETUP_SCRIPT}",
+                )
+            ensure_daemon_running()
+
     GuiApp(root)
     root.mainloop()
 

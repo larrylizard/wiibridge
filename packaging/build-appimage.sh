@@ -37,7 +37,7 @@ if [ ! -x AppDir/usr/python/bin/python3 ]; then
     rm -rf AppDir/usr/python/lib/python3.12/{test,idlelib,turtledemo,lib2to3,ensurepip,__pycache__}
     rm -rf AppDir/usr/python/lib/python3.12/site-packages/{pip,pip-*,setuptools,setuptools-*,wheel,wheel-*,_distutils_hack}
     find AppDir/usr/python -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-    rm -f AppDir/usr/python/bin/{idle3.12,2to3-3.12,pip,pip3,pip3.12}
+    rm -f AppDir/usr/python/bin/{idle3.12,2to3-3.12,pip,pip3,pip3.12,idle3,2to3}
 
     AppDir/usr/python/bin/python3 -c "import evdev, tkinter" \
         || { echo "Bundled interpreter failed evdev/tkinter smoke test" >&2; exit 1; }
