@@ -154,6 +154,38 @@ def fmt_mapping(spec):
     return code.replace("BTN_", "").replace("KEY_", "").title()
 
 
+class DiagnosticsDialog(tk.Toplevel):
+    """Everything needed to diagnose a problem in one selectable box, with
+    a copy button -- so nobody has to go looking for log files."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Diagnostics")
+        log_path = os.path.expanduser("~/.cache/wii-control/app.log")
+        try:
+            with open(log_path) as f:
+                tail = "".join(f.readlines()[-150:])
+        except OSError:
+            tail = "(no log file yet)"
+        self.text_value = bridge.diagnostics() + "\n\n--- app log (last 150 lines) ---\n" + tail
+
+        box = tk.Text(self, width=100, height=34, wrap="none")
+        box.insert("1.0", self.text_value)
+        box.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        row = tk.Frame(self)
+        row.pack(fill="x", padx=8, pady=(0, 8))
+        self.note = tk.Label(row, text="", fg="#2e7d32")
+        tk.Button(row, text="Copy to clipboard", command=self._copy).pack(side="left")
+        self.note.pack(side="left", padx=10)
+        tk.Button(row, text="Close", command=self.destroy).pack(side="right")
+
+    def _copy(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.text_value)
+        self.update()
+        self.note.config(text="Copied. Keep this app open while you paste.")
+
+
 class RemapDialog(tk.Toplevel):
     def __init__(self, parent, label, on_set):
         super().__init__(parent)
@@ -356,6 +388,11 @@ class GuiApp:
         log_path = os.path.expanduser("~/.cache/wii-control/app.log")
         tk.Label(parent, text="Log file (what the service is doing, and any errors):", anchor="w").pack(anchor="w", padx=10)
         tk.Label(parent, text=log_path, anchor="w", fg="#555").pack(anchor="w", padx=10)
+
+        def show_diagnostics():
+            DiagnosticsDialog(self.root)
+        tk.Button(parent, text="Diagnostics (copy this when reporting a problem)...",
+                  command=show_diagnostics).pack(anchor="w", padx=10, pady=(0, 6))
 
         def open_log():
             try:

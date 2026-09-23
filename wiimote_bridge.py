@@ -26,7 +26,7 @@ CAP_NET_RAW/CAP_NET_ADMIN on hcitool/hciconfig, both granted by the .deb
 (or packaging/setup-permissions.sh for the AppImage).
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 import atexit
 import ctypes
@@ -40,6 +40,7 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 
@@ -317,6 +318,37 @@ def acquire_single_instance():
         return False
     _LOCK_FD = fd
     return True
+
+
+def diagnostics():
+    """Plain-text snapshot of everything that decides whether scanning and
+    connecting can work: shown in the app and written at startup, so a
+    problem can be reported without hunting for files."""
+    def run(cmd):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            return (r.stdout + r.stderr).strip() or "(no output)"
+        except (OSError, subprocess.TimeoutExpired) as ex:
+            return f"(failed: {ex})"
+
+    out = [f"Wii Remote Control v{__version__}",
+           f"python: {sys.version.split()[0]} at {sys.executable}",
+           f"native bluetooth sockets: {HAVE_NATIVE_BT}  (False = using the libc fallback)",
+           f"user: {os.environ.get('USER')}  home: {os.path.expanduser('~')}  session: {os.environ.get('XDG_SESSION_TYPE')}",
+           f"config dir: {CONFIG_DIR}", "",
+           f"/dev/uinput writable: {os.access('/dev/uinput', os.W_OK)}"]
+    for tool in ("hcitool", "hciconfig"):
+        path = shutil.which(tool)
+        try:
+            cap = bool(path and os.getxattr(path, "security.capability"))
+        except OSError:
+            cap = False
+        out.append(f"{tool}: {path or 'NOT INSTALLED'}  scan capability: {cap}")
+    out += ["", "missing permissions: " + (", ".join(missing_permissions()) or "none"), "",
+            "--- hciconfig -a ---", run(["hciconfig", "-a"]), "",
+            "--- rfkill ---", run(["rfkill", "list", "bluetooth"]), "",
+            f"last scan problem: {SCAN_ERROR['text'] or 'none'}"]
+    return "\n".join(out)
 
 
 SCAN_ERROR = {"text": ""}
@@ -919,6 +951,7 @@ def serve():
     every remote and removes the virtual devices, and there is no separate
     long-lived service to go stale or get left running."""
     os.makedirs(CONFIG_DIR, exist_ok=True)
+    log("startup diagnostics:\n" + diagnostics())
     mapping = Mapping(MAPPING_PATH)
     pointer_cfg = PointerConfig(POINTER_PATH)
     ipc = IPCServer(SOCK_PATH, mapping, pointer_cfg)
