@@ -26,7 +26,7 @@ CAP_NET_RAW/CAP_NET_ADMIN on hcitool/hciconfig, both granted by the .deb
 (or packaging/setup-permissions.sh for the AppImage).
 """
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 import atexit
 import ctypes
@@ -154,6 +154,7 @@ ADAPTER_RE = re.compile(r"^(hci\d+):.*?\n\s*BD Address:\s*([0-9A-Fa-f:]{17})", r
 
 
 ADAPTER_UP_ERRORS = {}
+SCAN_STATS = {}  # per adapter: what scans have actually heard
 
 
 def list_adapters():
@@ -213,13 +214,37 @@ def discover_candidates(hci_name):
         detail = (res.stderr or res.stdout).strip().splitlines()
         return set(), f"{hci_name}: {detail[-1] if detail else f'scan failed (exit {res.returncode})'}"
 
+    st = SCAN_STATS.setdefault(hci_name, {"passes": 0, "heard": {}, "control": {}, "control_time": None})
+    st.update(last_time=time.strftime("%H:%M:%S"), last_rc=res.returncode,
+              last_out=res.stdout.strip(), last_err=res.stderr.strip())
+    st["passes"] += 1
+
     found = set()
     for addr, cod_hex in MAC_RE.findall(res.stdout):
         cod = int(cod_hex, 16)
-        major_device_class = (cod >> 8) & 0x1F
-        if major_device_class == 0x05:  # Peripheral
+        accepted = ((cod >> 8) & 0x1F) == 0x05  # Bluetooth 'Peripheral' major class
+        if addr.upper() not in st["heard"]:
+            log(f"{hci_name}: heard {addr.upper()} class 0x{cod:06x} -- "
+                + ("looks like a remote" if accepted else "IGNORED, not a Peripheral-class device"))
+        st["heard"][addr.upper()] = cod
+        if accepted:
             found.add(addr.upper())
     return found, ""
+
+
+def control_scan(hci_name):
+    """A general (GIAC) inquiry, ignoring the remote filter: does this
+    adapter hear ANY discoverable Bluetooth device? Tells "the adapter's
+    radio can't hear anything" apart from "it hears others but not the
+    remote". Result is kept in SCAN_STATS for the diagnostics report."""
+    st = SCAN_STATS.setdefault(hci_name, {"passes": 0, "heard": {}, "control": {}, "control_time": None})
+    try:
+        res = subprocess.run(["hcitool", "-i", hci_name, "inq", "--flush", "--length=2"],
+                             capture_output=True, text=True, timeout=10)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return
+    st["control"] = {a.upper(): int(c, 16) for a, c in MAC_RE.findall(res.stdout)}
+    st["control_time"] = time.strftime("%H:%M:%S")
 
 
 def missing_permissions():
@@ -320,6 +345,19 @@ def acquire_single_instance():
     return True
 
 
+def bluetoothd_state():
+    """Just the lines that matter from `bluetoothctl show` (the full
+    output is dozens of service UUIDs). "Discovering: yes" would mean the
+    desktop's own scan is competing with ours for the adapter."""
+    try:
+        r = subprocess.run(["bluetoothctl", "show"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as ex:
+        return f"(failed: {ex})"
+    keep = ("Controller", "Name:", "Alias:", "Powered:", "Discoverable:", "Pairable:", "Discovering:")
+    lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip().startswith(keep)]
+    return "\n".join(lines) or (r.stderr.strip() or "(no output)")
+
+
 def diagnostics():
     """Plain-text snapshot of everything that decides whether scanning and
     connecting can work: shown in the app and written at startup, so a
@@ -347,7 +385,20 @@ def diagnostics():
     out += ["", "missing permissions: " + (", ".join(missing_permissions()) or "none"), "",
             "--- hciconfig -a ---", run(["hciconfig", "-a"]), "",
             "--- rfkill ---", run(["rfkill", "list", "bluetooth"]), "",
-            f"last scan problem: {SCAN_ERROR['text'] or 'none'}"]
+            f"last scan problem: {SCAN_ERROR['text'] or 'none'}", "",
+            "--- bluetoothd (desktop Bluetooth service) ---", bluetoothd_state(), "",
+            "--- what scanning has heard ---"]
+    if not SCAN_STATS:
+        out.append("no completed scans yet")
+    for hci, st in SCAN_STATS.items():
+        out.append(f"{hci}: {st['passes']} remote-style (LIAC) scans, last at {st.get('last_time')}, "
+                   f"hcitool exit {st.get('last_rc')}, output: {st.get('last_out')!r} {st.get('last_err') or ''}")
+        out.append("   devices heard by those scans: " + (", ".join(
+            f"{a} class 0x{c:06x}" for a, c in st["heard"].items()) or "none"))
+        ctl = st["control"]
+        out.append(f"   control scan (general inquiry) at {st['control_time'] or 'not run yet'}: "
+                   + ("heard nothing" if st["control_time"] and not ctl else
+                      ", ".join(f"{a} class 0x{c:06x}" for a, c in ctl.items()) or "-"))
     return "\n".join(out)
 
 
@@ -971,6 +1022,13 @@ def serve():
             found, err = discover_candidates(hci_name)
             if err:
                 scan_errors.append(err)
+            else:
+                n = SCAN_STATS[hci_name]["passes"]
+                if n % 5 == 0:
+                    control_scan(hci_name)
+                if n % 6 == 1:
+                    log(f"scanning on {hci_name}: pass {n}, remotes heard so far: "
+                        f"{sum(1 for c in SCAN_STATS[hci_name]['heard'].values() if ((c >> 8) & 0x1F) == 5)}")
             for addr in found:
                 if addr in active:
                     continue
