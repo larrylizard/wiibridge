@@ -6,10 +6,9 @@
 #   - /dev/uinput is root-only by default. A udev rule with `uaccess`
 #     grants the logged-in desktop user an ACL on it -- no group
 #     membership and no logout needed. GROUP=input is the fallback.
-#   - Raw HCI operations (the LIAC inquiry scan) need CAP_NET_RAW /
-#     CAP_NET_ADMIN. Rather than running the daemon as root, grant those
-#     to hcitool/hciconfig, which the daemon shells out to.
-#   - btmon gets the same, to read the raw scan's results.
+#   - Raw HCI operations (the remote scan) need CAP_NET_RAW / CAP_NET_ADMIN.
+#     Rather than running the app as root, grant those to the app's small
+#     bundled helper (wiimote-hci), which it shells out to.
 #   - Bluetooth L2CAP data sockets need no privilege at all on Linux.
 set -euo pipefail
 
@@ -24,14 +23,28 @@ EOF
 udevadm control --reload-rules
 udevadm trigger --name-match=uinput
 
-for b in hcitool hciconfig; do
-    setcap cap_net_raw,cap_net_admin+eip "$(command -v "$b")"
-done
-# btmon reads the results of the raw remote scan (see RawInquiry in
-# wiimote_bridge.py). Optional: without it the app falls back to an older
-# scan method that some kernels can't do correctly.
-if command -v btmon >/dev/null 2>&1; then
-    setcap cap_net_raw,cap_net_admin+eip "$(command -v btmon)"
+# The app's own helper (path passed by the app): the only thing it needs.
+# Must be a plain file owned by the invoking user, not a symlink -- and note
+# a kernel drops file capabilities whenever the file is written to, so the
+# user can't alter the granted copy and keep the privilege.
+HELPER="${1:-}"
+if [ -n "$HELPER" ]; then
+    OWNER="${PKEXEC_UID:-${SUDO_UID:-}}"
+    if [ -L "$HELPER" ] || [ ! -f "$HELPER" ] || [ -z "$OWNER" ] || [ "$(stat -c %u "$HELPER")" != "$OWNER" ]; then
+        echo "Refusing to grant capabilities to $HELPER (not a plain file owned by you)." >&2
+        exit 1
+    fi
+    setcap cap_net_raw,cap_net_admin+eip "$HELPER"
 fi
+
+# Older installs / source checkouts use the system tools instead. Best
+# effort only: they may be absent (newer Fedora-based distros) or on a
+# read-only /usr (immutable distros), and that must not fail the setup.
+for b in hcitool hciconfig btmon; do
+    p="$(command -v "$b" 2>/dev/null || true)"
+    if [ -n "$p" ]; then
+        setcap cap_net_raw,cap_net_admin+eip "$p" 2>/dev/null || true
+    fi
+done
 
 echo "Done."

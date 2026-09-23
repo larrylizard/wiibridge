@@ -57,8 +57,8 @@ for the sake of those two things, the setup grants them
 narrowly, once:
 - a udev rule with `uaccess` for `/dev/uinput`, giving the logged-in desktop
   user an ACL (no group membership or logout needed)
-- `cap_net_raw`/`cap_net_admin` via `setcap` on the `hcitool`/`hciconfig`/`btmon`
-  binaries themselves, which the daemon just shells out to
+- `cap_net_raw`/`cap_net_admin` via `setcap` on the app's bundled
+  `wiimote-hci` helper, which the app shells out to for raw Bluetooth
 
 An earlier version of this launched the daemon via `pkexec` on every run
 instead. That turned out to fail silently on at least one machine --
@@ -82,7 +82,7 @@ wii-control
 The install itself (which already runs as root) applies everything the
 daemon needs: a udev rule giving the logged-in desktop user access to
 `/dev/uinput` (via `uaccess`, so no group membership or logout), and
-`setcap` on `hcitool`/`hciconfig`/`btmon`. An apt hook re-applies the `setcap`
+`setcap` on the app's bundled helper. An apt hook re-applies the `setcap`
 after `bluez` upgrades, which would otherwise silently drop it. There is
 no separate permission script to run and no password prompt from the app.
 
@@ -136,9 +136,10 @@ as needed.
 
 ## Requirements
 
-For the AppImage:
-- `bluez` (`hcitool`, `hciconfig`, `bluetoothd`)
-- `pkexec` (polkit) and `setcap`, for the one-time permission button
+For the AppImage: nothing from the Bluetooth tools (`hcitool`/`hciconfig`/
+`btmon` are not used). It does use, for the one-time permission button
+only: `pkexec` (polkit), `setcap` (libcap) and `udevadm`, `bash`, `stat`.
+Bluetooth and `uinput` support must be in the kernel, as on any distro.
 - A C compiler (`gcc`) is needed once, on whichever machine *builds* the
   AppImage, to compile `evdev`'s native extension into the bundled
   interpreter -- not needed on machines that just run the built AppImage.
@@ -156,20 +157,39 @@ environment the drawn cursor icon didn't visually follow. Suspected to be
 a virtual-display cursor-plane quirk specific to that VM rather than a
 bug in the input device itself; needs confirming on real hardware.
 
-## How remotes are found (and why not `hcitool inq`)
+## How remotes are found
 
-On the host that exposed this (kernel 7.0), neither `hcitool inq --iac=liac`
-nor the kernel's own "limited discovery" (`btmgmt find -l`) actually sends
-the limited inquiry Wii remotes answer -- both end up as a general scan,
-so the remote is never heard even though everything looks healthy. Sending
-the identical Inquiry as a raw HCI command works immediately (verified with
-a capture on that host: the remote answered within 21 ms and kept
-answering; a general-only device did not answer; a scan on an unused
-address heard nothing). So the app sends the raw command with
-`hcitool cmd 0x01 0x0001 0x00 0x8b 0x9e <len> 0x00` and reads the Inquiry
-Result events from `btmon`. Both need `CAP_NET_RAW`, which the one-time
-setup grants. Where `btmon` isn't installed, the app falls back to the
-older `hcitool inq` method and the check below.
+The remote only answers a *limited* Bluetooth inquiry. On the host that
+exposed this (kernel 7.0), neither `hcitool inq --iac=liac` nor the
+kernel's own "limited discovery" (`btmgmt find -l`) actually sends one --
+both end up as a general scan, so the remote is never heard even though
+permissions, adapters and errors all look healthy. Sending the identical
+Inquiry as a raw HCI command works immediately (a capture on that host
+showed the remote answering within 21 ms and continuously, a general-only
+device *not* answering, and an unused address hearing nothing).
+
+The app therefore does its own raw HCI, through a small bundled program,
+`packaging/helper/wiimote-hci.c` (static, needs only libc): it lists
+adapters, brings them up, and sends the Inquiry itself, decoding the
+Inquiry Result events directly. That also means **no dependency on
+`hcitool`, `hciconfig` or `btmon`** -- Fedora-based distros no longer ship
+them, and immutable ones (Bazzite, Silverblue, SteamOS) couldn't have
+capabilities set on system binaries anyway. The one-time grant applies the
+scan capability to the helper's own copy in `~/.cache/wii-control/bin/`
+(writable everywhere). A kernel drops file capabilities whenever a file is
+written to, so code running as you can't alter the granted copy and keep
+the privilege; a new app version that changes the helper simply asks for
+the grant again.
+
+A raw socket sees the adapter's replies to *every* program's commands, so
+the helper only trusts the first status reply after it sends (found on real
+hardware: a second scanner's "busy" reply was being mistaken for its own).
+If another program is scanning at the same time -- often the desktop's own
+Bluetooth settings window -- the controller refuses a second inquiry, and
+the app says so.
+
+Without the helper (running from a source checkout) the app falls back to
+the system `hcitool`/`btmon` methods, described below.
 
 ## Troubleshooting: "answers every scan as a general scan"
 

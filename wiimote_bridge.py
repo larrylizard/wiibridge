@@ -26,7 +26,7 @@ CAP_NET_RAW/CAP_NET_ADMIN on hcitool/hciconfig, both granted by the .deb
 (or packaging/setup-permissions.sh for the AppImage).
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 import atexit
 import collections
@@ -151,6 +151,28 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+HELPER_DEB_PATH = "/usr/lib/wii-control/wiimote-hci"
+
+
+def find_helper():
+    """The bundled raw-HCI helper (packaging/helper/wiimote-hci.c), which
+    replaces hcitool/hciconfig/btmon: newer Fedora-based distros don't ship
+    those, and immutable ones (Bazzite, Silverblue) can't have capabilities
+    set on system binaries. The GUI stages a copy in the user's cache and
+    points WIIMOTE_HCI at it; the .deb installs one system-wide."""
+    for p in (os.environ.get("WIIMOTE_HCI"), HELPER_DEB_PATH):
+        if p and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def has_capability(path):
+    try:
+        return bool(os.getxattr(path, "security.capability"))
+    except OSError:
+        return False
+
+
 ADAPTER_RE = re.compile(r"^(hci\d+):.*?\n\s*BD Address:\s*([0-9A-Fa-f:]{17})", re.MULTILINE | re.DOTALL)
 
 
@@ -165,6 +187,31 @@ def list_adapters():
     once that ceiling is hit. Spreading remotes across more than one
     adapter works around that. (This kernel doesn't expose an `address`
     sysfs attribute per hciN, so shell out to hciconfig instead.)"""
+    helper = find_helper()
+    if helper:
+        try:
+            res = subprocess.run([helper, "list"], capture_output=True, text=True, timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            return []
+        rows = [ln.split() for ln in res.stdout.splitlines() if len(ln.split()) == 3]
+        for name, _addr, state in rows:
+            if state == "UP":
+                ADAPTER_UP_ERRORS.pop(name, None)
+                continue
+            # Down (after a replug, or Bluetooth switched off in the desktop):
+            # bring it up, and remember why if that fails -- otherwise the
+            # scan fails with a cryptic "Network is down".
+            try:
+                up = subprocess.run([helper, "up", name], capture_output=True, text=True, timeout=5)
+            except (subprocess.TimeoutExpired, OSError):
+                continue
+            if up.returncode == 0:
+                ADAPTER_UP_ERRORS.pop(name, None)
+            else:
+                lines = (up.stderr or up.stdout).strip().splitlines()
+                ADAPTER_UP_ERRORS[name] = lines[-1] if lines else "could not be enabled"
+        return [(name, addr.upper()) for name, addr, _state in rows]
+
     try:
         out = subprocess.run(["hciconfig", "-a"], capture_output=True, text=True, timeout=5).stdout
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -279,31 +326,27 @@ def control_scan(hci_name):
 
 
 def missing_permissions():
-    """What this process needs that the system hasn't granted yet. The
-    daemon needs BOTH /dev/uinput and the HCI capability on hcitool and
-    hciconfig; checking only the first meant a machine with uinput access
-    but no capability ran "fine" and then silently found no remotes."""
+    """What this process needs that the system hasn't granted yet."""
     missing = []
     if not os.access("/dev/uinput", os.W_OK):
         missing.append("write access to /dev/uinput")
+    helper = find_helper()
+    if helper:
+        # The bundled helper is all that's needed -- none of the old tools.
+        if not has_capability(helper):
+            missing.append("the Bluetooth scan capability on the app's helper")
+        return missing
+    # No helper (running from a source checkout): fall back to the system
+    # tools, which then need the capability instead.
     for tool in ("hcitool", "hciconfig"):
         path = shutil.which(tool)
         if not path:
             missing.append(f"{tool} is not installed (install bluez)")
-            continue
-        try:
-            os.getxattr(path, "security.capability")
-        except OSError:
+        elif not has_capability(path):
             missing.append(f"the Bluetooth scan capability on {tool}")
-    # btmon is what the raw scan reads its results from; it's optional (the
-    # older scan method is the fallback), but if it's installed it needs the
-    # capability too or the raw method can't be used.
     btmon = shutil.which("btmon")
-    if btmon:
-        try:
-            os.getxattr(btmon, "security.capability")
-        except OSError:
-            missing.append("the Bluetooth monitor capability on btmon")
+    if btmon and not has_capability(btmon):
+        missing.append("the Bluetooth monitor capability on btmon")
     return missing
 
 
@@ -415,18 +458,17 @@ def diagnostics():
            f"user: {os.environ.get('USER')}  home: {os.path.expanduser('~')}  session: {os.environ.get('XDG_SESSION_TYPE')}",
            f"config dir: {CONFIG_DIR}", "",
            f"/dev/uinput writable: {os.access('/dev/uinput', os.W_OK)}"]
+    helper = find_helper()
+    out.append(f"bundled helper: {helper or 'none'}  scan capability: {has_capability(helper) if helper else False}"
+               f"  => scan method: {'bundled helper, raw HCI inquiry' if helper else 'system tools (see below)'}")
     for tool in ("hcitool", "hciconfig"):
         path = shutil.which(tool)
-        try:
-            cap = bool(path and os.getxattr(path, "security.capability"))
-        except OSError:
-            cap = False
-        out.append(f"{tool}: {path or 'NOT INSTALLED'}  scan capability: {cap}")
+        out.append(f"{tool}: {path or 'not installed'}  scan capability: {has_capability(path) if path else False}"
+                   + ("" if helper else "   <- needed only because there is no bundled helper"))
     btmon = shutil.which("btmon")
-    out.append(f"btmon: {btmon or 'not installed'}  raw-scan capability: {raw_inquiry_available()}  "
-               f"=> scan method: {'raw HCI inquiry via btmon' if raw_inquiry_available() else 'hcitool inq (fallback)'}")
+    out.append(f"btmon: {btmon or 'not installed'}  capability: {has_capability(btmon) if btmon else False}")
     out += ["", "missing permissions: " + (", ".join(missing_permissions()) or "none"), "",
-            "--- hciconfig -a ---", run(["hciconfig", "-a"]), "",
+            "--- adapters ---", (run([helper, "list"]) if helper else run(["hciconfig", "-a"])), "",
             "--- rfkill ---", run(["rfkill", "list", "bluetooth"]), "",
             f"last scan problem: {SCAN_ERROR['text'] or 'none'}", "",
             "--- bluetoothd (desktop Bluetooth service) ---", bluetoothd_state(), "",
@@ -572,24 +614,50 @@ class RawInquiry:
         self.complete.wait(length * 1.28 + 3)
         time.sleep(0.3)  # let the last events finish parsing
 
-        st = SCAN_STATS.setdefault(self.hci, {"passes": 0, "heard": {}, "control": {}, "control_time": None})
         with self.lock:
             seen = [(a, c) for (t, a, c) in self.recent if t >= t0]
             self.recent = [r for r in self.recent if r[0] >= t0]
-        st.update(mode="raw HCI inquiry via btmon", last_time=time.strftime("%H:%M:%S"), last_rc=res.returncode,
-                  last_out=f"{len(seen)} result(s)", last_err="")
-        st["passes"] += 1
+        return record_scan(self.hci, seen, "raw HCI inquiry via btmon"), ""
 
-        found = set()
-        for addr, cod in seen:
-            accepted = ((cod >> 8) & 0x1F) == 0x05
-            if addr not in st["heard"]:
-                log(f"{self.hci}: heard {addr} class 0x{cod:06x} -- "
-                    + ("looks like a remote" if accepted else "IGNORED, not a Peripheral-class device"))
-            st["heard"][addr] = cod
-            if accepted:
-                found.add(addr)
-        return found, ""
+
+def record_scan(hci_name, seen, mode):
+    """Bookkeeping shared by the scan methods: remember what was heard, log
+    first sightings (including devices the class filter ignores), and return
+    the addresses that look like remotes."""
+    st = SCAN_STATS.setdefault(hci_name, {"passes": 0, "heard": {}, "control": {}, "control_time": None})
+    st.update(mode=mode, last_time=time.strftime("%H:%M:%S"), last_rc=0,
+              last_out=f"{len(seen)} result(s)", last_err="")
+    st["passes"] += 1
+    found = set()
+    for addr, cod in seen:
+        accepted = ((cod >> 8) & 0x1F) == 0x05  # Bluetooth 'Peripheral' major class
+        if addr not in st["heard"]:
+            log(f"{hci_name}: heard {addr} class 0x{cod:06x} -- "
+                + ("looks like a remote" if accepted else "IGNORED, not a Peripheral-class device"))
+        st["heard"][addr] = cod
+        if accepted:
+            found.add(addr)
+    return found
+
+
+def helper_scan(helper, hci_name, seconds, lap_hex):
+    """Inquiry through the bundled helper. Returns ([(addr, class)], error)."""
+    try:
+        res = subprocess.run([helper, "scan", hci_name, f"{seconds:.2f}", lap_hex],
+                             capture_output=True, text=True, timeout=seconds + 8)
+    except subprocess.TimeoutExpired:
+        return [], f"{hci_name}: scan timed out"
+    except OSError as ex:
+        return [], f"could not run the Bluetooth helper: {ex}"
+    if res.returncode != 0:
+        lines = (res.stderr or res.stdout).strip().splitlines()
+        return [], f"{hci_name}: {lines[-1] if lines else f'scan failed (exit {res.returncode})'}"
+    seen = []
+    for ln in res.stdout.splitlines():
+        parts = ln.split()
+        if len(parts) == 2:
+            seen.append((parts[0].upper(), int(parts[1], 16)))
+    return seen, ""
 
 
 RAW_SCANNERS = {}
@@ -611,6 +679,28 @@ def raw_inquiry_available():
 def scan_adapter(hci_name):
     """One discovery pass on an adapter, by the best available method.
     Returns (addresses, error)."""
+    helper = find_helper()
+    if helper:
+        if hci_name in ADAPTER_UP_ERRORS:
+            reason = ADAPTER_UP_ERRORS[hci_name]
+            hint = " -- turn Bluetooth on in your system settings" if "RF-kill" in reason else ""
+            return set(), f"{hci_name} is disabled and couldn't be enabled ({reason}){hint}"
+        seen, err = helper_scan(helper, hci_name, SCAN_LENGTH * 1.28, "9e8b00")  # 9e8b00 = limited inquiry
+        if err:
+            return set(), err
+        found = record_scan(hci_name, seen, "bundled helper, raw HCI inquiry")
+        st = SCAN_STATS[hci_name]
+        n = st["passes"]
+        if n == 1 or n % 5 == 0:  # control: does this adapter hear ANY device? (general inquiry, no filter)
+            ctl, cerr = helper_scan(helper, hci_name, 2.5, "9e8b33")
+            if not cerr:
+                st["control"] = {a: c for a, c in ctl}
+                st["control_time"] = time.strftime("%H:%M:%S")
+        if n % 6 == 1:
+            log(f"scanning on {hci_name}: pass {n}, remotes heard so far: "
+                f"{sum(1 for c in st['heard'].values() if ((c >> 8) & 0x1F) == 5)}")
+        return found, ""
+
     if raw_inquiry_available():
         scanner = RAW_SCANNERS.setdefault(hci_name, RawInquiry(hci_name))
         found, err = scanner.scan(SCAN_LENGTH * 1.28)

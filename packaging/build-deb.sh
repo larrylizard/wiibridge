@@ -1,18 +1,22 @@
 #!/bin/bash
-# Builds packaging/wii-control_<version>_all.deb. Unlike the AppImage, a
+# Builds packaging/wii-control_<version>_<arch>.deb (arch-specific: it holds a compiled helper). Unlike the AppImage, a
 # .deb installs as root, so its postinst can apply the udev rule and
 # setcap directly -- the user never runs a permission script by hand.
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 
 VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' ../wiimote_bridge.py)
-PKG=wii-control_${VERSION}_all
+ARCH=$(dpkg --print-architecture)
+PKG=wii-control_${VERSION}_${ARCH}
 STAGE=build-deb/$PKG
 
 rm -rf build-deb
 mkdir -p "$STAGE"/{DEBIAN,usr/bin,usr/lib/wii-control,usr/share/applications,usr/share/icons/hicolor/256x256/apps,lib/udev/rules.d,etc/apt/apt.conf.d}
 
 cp ../wiimote_bridge.py ../wiimote_gui.py "$STAGE/usr/lib/wii-control/"
+gcc -O2 -Wall -static -o "$STAGE/usr/lib/wii-control/wiimote-hci" helper/wiimote-hci.c 2>/dev/null \
+    || gcc -O2 -Wall -o "$STAGE/usr/lib/wii-control/wiimote-hci" helper/wiimote-hci.c
+"$STAGE/usr/lib/wii-control/wiimote-hci" selftest >/dev/null || { echo "helper self-test failed" >&2; exit 1; }
 cp AppDir/wiimote-control.png "$STAGE/usr/share/icons/hicolor/256x256/apps/wii-control.png"
 
 cat > "$STAGE/usr/bin/wii-control" <<'EOF'
@@ -41,8 +45,10 @@ EOF
 # package replaces those binaries and silently drops them.
 cat > "$STAGE/usr/lib/wii-control/fix-caps.sh" <<'EOF'
 #!/bin/sh
+setcap cap_net_raw,cap_net_admin+eip /usr/lib/wii-control/wiimote-hci
+# Older tools, best effort only (absent on newer Fedora-based distros).
 for b in hcitool hciconfig btmon; do
-    p=$(command -v $b) && setcap cap_net_raw,cap_net_admin+eip "$p"
+    p=$(command -v $b) && setcap cap_net_raw,cap_net_admin+eip "$p" || true
 done
 exit 0
 EOF
@@ -55,7 +61,7 @@ Package: wii-control
 Version: $VERSION
 Section: utils
 Priority: optional
-Architecture: all
+Architecture: $ARCH
 Depends: python3, python3-evdev, python3-tk, bluez, libcap2-bin
 Maintainer: wii-control <noreply@example.invalid>
 Description: Wii Remote support without an emulator

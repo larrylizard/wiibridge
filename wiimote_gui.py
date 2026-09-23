@@ -11,6 +11,7 @@ Changes take effect live -- the daemon rebuilds its virtual input device
 for that remote immediately.
 """
 
+import filecmp
 import json
 import os
 import queue
@@ -29,6 +30,37 @@ import wiimote_bridge as bridge
 from wiimote_bridge import INPUT_NAMES, SOCK_PATH
 
 MAX_SLOTS = 4
+
+def _stage_helper():
+    """Copy the bundled raw-HCI helper out of the AppImage to the user's
+    cache and point the bridge at it. The one-time grant applies the
+    scan capability to THIS copy: root can't read files inside the AppImage's
+    FUSE mount, and system binaries (hcitool etc.) may be absent or, on
+    immutable distros, impossible to modify. A kernel drops file capabilities
+    whenever a file is written to, so a process running as the user cannot
+    tamper with the granted copy while keeping the privilege.
+    Returns the staged path, or None (deb install / source checkout: the
+    bridge finds its own)."""
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wiimote-hci")
+    if not os.path.exists(src):
+        return None
+    dest_dir = os.path.expanduser("~/.cache/wii-control/bin")
+    dest = os.path.join(dest_dir, "wiimote-hci")
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        if not (os.path.exists(dest) and filecmp.cmp(src, dest, shallow=False)):
+            tmp = dest + ".new"
+            shutil.copy2(src, tmp)
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, dest)  # a new file: any old grant is gone, so it must be re-granted
+    except OSError:
+        return None
+    os.environ["WIIMOTE_HCI"] = dest
+    return dest
+
+
+HELPER_PATH = _stage_helper()
+
 
 def _stage_setup_script():
     """Root can't read files inside the AppImage's FUSE mount (it's
@@ -95,7 +127,8 @@ def request_permission_grant():
     if not pkexec:
         return False, "pkexec (polkit) isn't installed, so there is no system password dialog to use."
     try:
-        r = subprocess.run([pkexec, "bash", SETUP_SCRIPT], capture_output=True, text=True, timeout=180)
+        r = subprocess.run([pkexec, "bash", SETUP_SCRIPT] + ([HELPER_PATH] if HELPER_PATH else []),
+                           capture_output=True, text=True, timeout=180)
     except subprocess.TimeoutExpired:
         return False, "Timed out waiting for the password dialog."
     except OSError as ex:

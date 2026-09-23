@@ -46,6 +46,11 @@ if [ ! -x AppDir/usr/python/bin/python3 ]; then
 fi
 
 mkdir -p AppDir/usr/bin
+# The raw-HCI helper (see helper/wiimote-hci.c). Static, so it runs on any
+# host regardless of its libc; falls back to dynamic if libc.a is missing.
+gcc -O2 -Wall -static -o AppDir/usr/bin/wiimote-hci helper/wiimote-hci.c 2>/dev/null \
+    || gcc -O2 -Wall -o AppDir/usr/bin/wiimote-hci helper/wiimote-hci.c
+AppDir/usr/bin/wiimote-hci selftest >/dev/null || { echo "helper self-test failed" >&2; exit 1; }
 cp ../wiimote_bridge.py ../wiimote_gui.py setup-permissions.sh AppDir/usr/bin/
 
 rm -f Wii-Remote-Control-*.AppImage
