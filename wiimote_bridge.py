@@ -26,11 +26,15 @@ CAP_NET_RAW/CAP_NET_ADMIN on hcitool/hciconfig, both granted by the .deb
 (or packaging/setup-permissions.sh for the AppImage).
 """
 
+import ctypes
+import errno
 import json
 import os
 import re
+import select
 import shutil
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -217,6 +221,62 @@ def missing_permissions():
         except OSError:
             missing.append(f"the Bluetooth scan capability on {tool}")
     return missing
+
+
+# The AppImage's bundled portable Python is built without Bluetooth headers,
+# so socket.AF_BLUETOOTH doesn't exist there (discovery still worked, since
+# that shells out to hcitool -- connecting is what crashed). Fall back to
+# opening the same L2CAP socket through libc directly. WIIMOTE_FORCE_CTYPES=1
+# forces this path so it can be tested on a Python that has native support.
+HAVE_NATIVE_BT = hasattr(socket, "AF_BLUETOOTH") and not os.environ.get("WIIMOTE_FORCE_CTYPES")
+_AF_BLUETOOTH, _BTPROTO_L2CAP = 31, 0
+
+
+def _sockaddr_l2(bdaddr, psm):
+    # struct sockaddr_l2: family, psm, bdaddr (6 bytes, reversed), cid, type
+    raw = bytes(int(x, 16) for x in bdaddr.split(":"))[::-1]
+    return struct.pack("<HH6sHBx", _AF_BLUETOOTH, psm, raw, 0, 0)
+
+
+def open_l2cap(local_addr, remote_addr, psm, timeout=5.0):
+    """Connected L2CAP SEQPACKET socket to remote_addr:psm, sourced from the
+    local adapter local_addr. Raises OSError on failure."""
+    if HAVE_NATIVE_BT:
+        sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
+        try:
+            sock.bind((local_addr, 0))
+            sock.settimeout(timeout)
+            sock.connect((remote_addr, psm))
+        except BaseException:
+            sock.close()
+            raise
+        return sock
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    fd = libc.socket(_AF_BLUETOOTH, socket.SOCK_SEQPACKET, _BTPROTO_L2CAP)
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), "socket(AF_BLUETOOTH) failed")
+    sock = socket.socket(fileno=fd)  # wrap so send/recv/close/timeouts work as usual
+    try:
+        local = _sockaddr_l2(local_addr, 0)
+        if libc.bind(fd, local, len(local)) < 0:
+            raise OSError(ctypes.get_errno(), "bind failed")
+        sock.settimeout(timeout)  # non-blocking underneath; connect below returns EINPROGRESS
+        remote = _sockaddr_l2(remote_addr, psm)
+        if libc.connect(fd, remote, len(remote)) < 0:
+            err = ctypes.get_errno()
+            if err != errno.EINPROGRESS:
+                raise OSError(err, os.strerror(err))
+            _, writable, _ = select.select([], [fd], [], timeout)
+            if not writable:
+                raise socket.timeout("timed out")
+            err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if err:
+                raise OSError(err, os.strerror(err))
+    except BaseException:
+        sock.close()
+        raise
+    return sock
 
 
 SCAN_ERROR = {"text": ""}
@@ -471,15 +531,8 @@ class Wiimote:
         self.last_report_time = time.time()
 
     def connect(self):
-        self.ctrl = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
-        self.ctrl.bind((self.local_addr, 0))
-        self.ctrl.settimeout(5)
-        self.ctrl.connect((self.addr, CTRL_PSM))
-
-        self.intr = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
-        self.intr.bind((self.local_addr, 0))
-        self.intr.settimeout(5)
-        self.intr.connect((self.addr, INTR_PSM))
+        self.ctrl = open_l2cap(self.local_addr, self.addr, CTRL_PSM)
+        self.intr = open_l2cap(self.local_addr, self.addr, INTR_PSM)
 
         # Light this remote's own player LED (1-4) rather than always LED1.
         slot = assign_player_slot(self.addr)
