@@ -210,3 +210,19 @@ hcitool -i hci0 inq --iac=0x9e8b01 --flush --length=4
 ```
 
 Anything listed means the requested scan type is being ignored.
+
+## Related projects
+
+- [xwiimote](https://github.com/xwiimote/xwiimote) - the kernel-driver-based
+  Wii Remote stack for Linux. It expects the remote to pair through normal
+  BlueZ discovery. This project is independent of it (no shared code) and
+  targets the case where that fails: clone remotes that only answer the
+  *limited* Bluetooth inquiry and have no SDP record, so ordinary scans never
+  see them. It connects over raw L2CAP instead and needs no kernel driver or
+  system packages beyond the kernel's Bluetooth and uinput support.
+- [Dolphin](https://dolphin-emu.org/) - the emulator whose Wii Remote scanning
+  showed that limited inquiry was the missing piece.
+
+## License
+
+MIT - see [LICENSE](LICENSE). Anyone may copy, modify and redistribute it.
