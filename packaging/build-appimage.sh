@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds Wii-Remote-Control-x86_64.AppImage, fully self-contained: it
+# Builds WiiBridge-x86_64.AppImage, fully self-contained: it
 # bundles its own Python interpreter (with evdev + Tkinter already
 # installed) so the AppImage doesn't depend on whatever Python packages
 # happen to be on the host. Downloads appimagetool and the portable
@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 
 VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' ../wiimote_bridge.py)
-OUT="Wii-Remote-Control-${VERSION}-x86_64.AppImage"
+OUT="WiiBridge-${VERSION}-x86_64.AppImage"
 PYTHON_RELEASE=20260901
 PYTHON_VERSION=3.12.14
 
@@ -53,7 +53,7 @@ gcc -O2 -Wall -static -o AppDir/usr/bin/wiimote-hci helper/wiimote-hci.c 2>/dev/
 AppDir/usr/bin/wiimote-hci selftest >/dev/null || { echo "helper self-test failed" >&2; exit 1; }
 cp ../wiimote_bridge.py ../wiimote_gui.py setup-permissions.sh AppDir/usr/bin/
 
-rm -f Wii-Remote-Control-*.AppImage
+rm -f WiiBridge-*.AppImage
 ARCH=x86_64 ./"$APPIMAGETOOL" AppDir "$OUT"
 
 echo "Built packaging/$OUT"

@@ -26,7 +26,7 @@ CAP_NET_RAW/CAP_NET_ADMIN on hcitool/hciconfig, both granted by the .deb
 (or packaging/setup-permissions.sh for the AppImage).
 """
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 import atexit
 import collections
@@ -151,7 +151,7 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-HELPER_DEB_PATH = "/usr/lib/wii-control/wiimote-hci"
+HELPER_DEB_PATH = "/usr/lib/wiibridge/wiimote-hci"
 
 
 def find_helper():
@@ -452,7 +452,7 @@ def diagnostics():
         except (OSError, subprocess.TimeoutExpired) as ex:
             return f"(failed: {ex})"
 
-    out = [f"Wii Remote Control v{__version__}",
+    out = [f"WiiBridge v{__version__}",
            f"python: {sys.version.split()[0]} at {sys.executable}",
            f"native bluetooth sockets: {HAVE_NATIVE_BT}  (False = using the libc fallback)",
            f"user: {os.environ.get('USER')}  home: {os.path.expanduser('~')}  session: {os.environ.get('XDG_SESSION_TYPE')}",
@@ -1337,7 +1337,7 @@ def serve():
     threading.Thread(target=watchdog, daemon=True).start()
 
     active = {}  # addr -> thread
-    log(f"Wii Remote Control v{__version__} - service starting. Hold SYNC on a remote to connect it.")
+    log(f"WiiBridge v{__version__} - service starting. Hold SYNC on a remote to connect it.")
     while True:
         for addr in list(active):
             if not active[addr].is_alive():
@@ -1375,7 +1375,7 @@ def main():
     if missing:
         raise SystemExit("Missing permissions: " + "; ".join(missing) + ". Install the .deb, or run packaging/setup-permissions.sh.")
     if not acquire_single_instance():
-        raise SystemExit("Wii Remote Control is already running.")
+        raise SystemExit("WiiBridge is already running.")
     serve()
 
 

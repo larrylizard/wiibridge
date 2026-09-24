@@ -370,7 +370,7 @@ class GuiApp:
         self.root.after(50, self._poll_queue)
 
     def _build_ui(self):
-        self.root.title(f"Wii Remote Control v{bridge.__version__}")
+        self.root.title(f"WiiBridge v{bridge.__version__}")
 
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill="both", expand=True)
@@ -381,7 +381,7 @@ class GuiApp:
         self.setup_frame = tk.LabelFrame(controllers_tab, text="One-time setup needed", padx=10, pady=8)
         tk.Label(
             self.setup_frame, justify="left", wraplength=620,
-            text="Wii Remote Control needs permission to scan for remotes over "
+            text="WiiBridge needs permission to scan for remotes over "
                  "Bluetooth and to create virtual controllers. Your computer "
                  "restricts both by default. Click the button to grant it -- "
                  "your system will ask for your password in its own dialog. "
@@ -636,7 +636,7 @@ def main():
     root = tk.Tk()
     if not bridge.acquire_single_instance():
         root.withdraw()
-        messagebox.showinfo("Already running", "Wii Remote Control is already running.")
+        messagebox.showinfo("Already running", "WiiBridge is already running.")
         return
 
     # Nothing else captures the service's output now that it runs in this

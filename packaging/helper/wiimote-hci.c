@@ -1,5 +1,5 @@
 /*
- * wiimote-hci: the few raw Bluetooth HCI operations Wii Remote Control needs,
+ * wiimote-hci: the few raw Bluetooth HCI operations WiiBridge needs,
  * so the app doesn't depend on hcitool / hciconfig / btmon -- Fedora-based
  * distros no longer ship them, and immutable ones (Bazzite, Silverblue,
  * SteamOS) can't have capabilities set on system binaries anyway. Needs

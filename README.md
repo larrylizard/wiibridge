@@ -1,4 +1,4 @@
-# Wii Remote Control
+# WiiBridge
 
 Native Linux OS support for Wii Remotes -- including third-party/clone
 remotes -- with no emulator involved. Connected remotes show up as normal
@@ -75,8 +75,8 @@ Bluetooth address) under `~/.config/wii_control/`.
 
 ```
 packaging/build-deb.sh
-sudo apt install ./packaging/wii-control_<version>_all.deb
-wii-control
+sudo apt install ./packaging/wiibridge_<version>_<arch>.deb
+wiibridge
 ```
 
 The install itself (which already runs as root) applies everything the
@@ -90,7 +90,7 @@ no separate permission script to run and no password prompt from the app.
 
 ```
 packaging/build-appimage.sh
-packaging/Wii-Remote-Control-<version>-x86_64.AppImage
+packaging/WiiBridge-<version>-x86_64.AppImage
 ```
 
 The GUI always opens. The first time on a computer it shows a "One-time
