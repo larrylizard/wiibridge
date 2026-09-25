@@ -38,8 +38,6 @@ Dolphin is not involved anywhere in this pipeline.
   simultaneous connections).
 - **`wiimote_gui.py`** -- a Tkinter GUI. Shows up to 4 connected remotes
   side by side, each with live button state, independent remapping, IR
-  Each remote can be set to show as a joystick or act as a keyboard only, and
-  any button can be mapped to an analog stick direction (held = fully pushed).
   pointer controls, and a Settings tab listing detected Bluetooth
   adapters. It runs the daemon **inside the same process**, so the service
   only exists while the window is open: closing the app disconnects every
@@ -49,6 +47,8 @@ Dolphin is not involved anywhere in this pipeline.
   the process dies, so a crash never leaves a stale lock); a second launch
   just says it's already running. GUI and daemon still talk over a local
   Unix socket (`/tmp/wiimote_bridge.sock`).
+  Each remote can be set to show as a joystick or act as a keyboard only, and
+  any button can be mapped to an analog stick direction (held = fully pushed).
 
 ### Why the daemon doesn't need root
 
