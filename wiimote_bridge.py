@@ -26,7 +26,7 @@ CAP_NET_RAW/CAP_NET_ADMIN on hcitool/hciconfig, both granted by the .deb
 (or packaging/setup-permissions.sh for the AppImage).
 """
 
-__version__ = "0.4.2"
+__version__ = "0.5.0"
 
 import atexit
 import collections
@@ -87,6 +87,17 @@ INPUT_BITS = {
     "TWO": (1, 0x01), "ONE": (1, 0x02), "B": (1, 0x04),
     "A": (1, 0x08), "MINUS": (1, 0x10), "HOME": (1, 0x80),
 }
+
+# Analog stick directions a button can be mapped to (button down = axis at
+# 100% in that direction). name -> (evdev axis, direction). "Up" is negative,
+# as on standard gamepads.
+STICK_DIRECTIONS = {
+    "LSTICK_LEFT": ("ABS_X", -1), "LSTICK_RIGHT": ("ABS_X", 1),
+    "LSTICK_UP": ("ABS_Y", -1), "LSTICK_DOWN": ("ABS_Y", 1),
+    "RSTICK_LEFT": ("ABS_RX", -1), "RSTICK_RIGHT": ("ABS_RX", 1),
+    "RSTICK_UP": ("ABS_RY", -1), "RSTICK_DOWN": ("ABS_RY", 1),
+}
+STICK_MIN, STICK_MAX = -32768, 32767
 
 DEFAULT_MAPPING = {
     "A": {"kind": "button", "code": "BTN_A"},
@@ -787,7 +798,9 @@ class Mapping:
 class PointerConfig:
     """Same per-device pattern as Mapping, for the IR-pointer feature."""
 
-    DEFAULTS = {"enabled": False, "invert_x": True, "invert_y": False}
+    # "joystick": whether the remote also appears as a gamepad device. Off = it
+    # only emulates keyboard keys (and the pointer), so games never see a gamepad.
+    DEFAULTS = {"enabled": False, "invert_x": True, "invert_y": False, "joystick": True}
 
     def __init__(self, path):
         self.path = path
@@ -903,7 +916,8 @@ class IPCServer(threading.Thread):
         if t == "set_mapping":
             addr = msg.get("addr")
             name, kind, code = msg.get("input"), msg.get("kind"), msg.get("code", "")
-            if addr and name in INPUT_NAMES and kind in ("key", "button", "none") and (kind == "none" or code in e.ecodes):
+            valid_code = code in STICK_DIRECTIONS if kind == "axis" else code in e.ecodes
+            if addr and name in INPUT_NAMES and kind in ("key", "button", "axis", "none") and (kind == "none" or valid_code):
                 self.mapping.set(addr, name, kind, code)
                 with REGISTRY_LOCK:
                     wm = REGISTRY.get(addr)
@@ -921,12 +935,16 @@ class IPCServer(threading.Thread):
                 kwargs["invert_x"] = bool(msg["invert_x"])
             if "invert_y" in msg:
                 kwargs["invert_y"] = bool(msg["invert_y"])
+            if "joystick" in msg:
+                kwargs["joystick"] = bool(msg["joystick"])
             self.pointer_cfg.update(addr, **kwargs)
-            if "enabled" in kwargs:
-                with REGISTRY_LOCK:
-                    wm = REGISTRY.get(addr)
-                if wm:
+            with REGISTRY_LOCK:
+                wm = REGISTRY.get(addr)
+            if wm:
+                if "enabled" in kwargs:
                     wm.set_pointer_enabled(kwargs["enabled"])
+                if "joystick" in kwargs:
+                    wm.rebuild_uinput()
             self.broadcast({"type": "pointer", "addr": addr, "config": self.pointer_cfg.get_for(addr)})
         elif t == "get_snapshot":
             self._send_snapshot(conn)
@@ -974,6 +992,8 @@ class Wiimote:
         self.ctrl = None
         self.intr = None
         self.ui_pad = None
+        self.pad_has_accel = True
+        self.stick_value = {}
         self.ui_kbd = None
         self.ui_ptr = None
         self.ptr_touching = False
@@ -1115,34 +1135,60 @@ class Wiimote:
                 log(f"{self.addr}: pointer disabled")
 
     def rebuild_uinput(self):
+        joystick = self.pointer_cfg.get_for(self.addr).get("joystick", True)
         btn_codes = set()
+        stick_axes = set()
         for spec in self.mapping.get_for(self.addr).values():
             if spec.get("kind") == "button":
                 code_id = e.ecodes.get(spec.get("code"))
                 if code_id is not None:
                     btn_codes.add(code_id)
-        pad_capabilities = {
-            e.EV_KEY: sorted(btn_codes),
-            e.EV_ABS: [
+            elif spec.get("kind") == "axis" and spec.get("code") in STICK_DIRECTIONS:
+                stick_axes.add(STICK_DIRECTIONS[spec["code"]][0])
+        if stick_axes:
+            # A stick pair is always declared whole (X with Y), so a game
+            # sees a proper analog stick. The accelerometer is dropped: it
+            # used ABS_X/Y/Z, which would fight the stick for the same axes.
+            if stick_axes & {"ABS_X", "ABS_Y"}:
+                stick_axes |= {"ABS_X", "ABS_Y"}
+            if stick_axes & {"ABS_RX", "ABS_RY"}:
+                stick_axes |= {"ABS_RX", "ABS_RY"}
+            abs_caps = [(e.ecodes[n], AbsInfo(0, STICK_MIN, STICK_MAX, 16, 128, 0)) for n in sorted(stick_axes)]
+        else:
+            abs_caps = [
                 (e.ABS_X, AbsInfo(0, -128, 127, 0, 4, 0)),
                 (e.ABS_Y, AbsInfo(0, -128, 127, 0, 4, 0)),
                 (e.ABS_Z, AbsInfo(0, -128, 127, 0, 4, 0)),
-            ],
-        }
+            ]
         with self.ui_lock:
             if self.ui_pad:
                 self.ui_pad.close()
-            self.ui_pad = UInput(
-                pad_capabilities,
-                name=f"Wii Remote ({self.addr})",
-                vendor=0x057E, product=0x0306, version=1,
-            )
+                self.ui_pad = None
+            self.pad_has_accel = not stick_axes
+            self.stick_value = {}
+            if joystick:
+                self.ui_pad = UInput(
+                    {e.EV_KEY: sorted(btn_codes), e.EV_ABS: abs_caps},
+                    name=f"Wii Remote ({self.addr})",
+                    vendor=0x057E, product=0x0306, version=1,
+                )
             if self.ui_kbd is None:
                 self.ui_kbd = UInput(
                     {e.EV_KEY: FULL_KEYBOARD_CODES},
                     name=f"Wii Remote Keyboard ({self.addr})",
                     vendor=0x057E, product=0x0306, version=1,
                 )
+
+    def _write_accel(self, ax, ay, az):
+        """Called with self.ui_lock held."""
+        if self.ui_pad and self.pad_has_accel:
+            self.ui_pad.write(e.EV_ABS, e.ABS_X, ax - 128)
+            self.ui_pad.write(e.EV_ABS, e.ABS_Y, ay - 128)
+            self.ui_pad.write(e.EV_ABS, e.ABS_Z, az - 128)
+
+    def _sync_pad(self):
+        if self.ui_pad:
+            self.ui_pad.syn()
 
     def _apply_buttons(self, b0, b1):
         """Called with self.ui_lock held."""
@@ -1157,14 +1203,32 @@ class Wiimote:
             spec = spec_map.get(name)
             if not spec or spec.get("kind") == "none":
                 continue
+            if spec["kind"] == "axis":
+                continue  # handled below, once all changes are known
             code_id = e.ecodes.get(spec.get("code"))
             if code_id is None:
                 continue
             if spec["kind"] == "key":
                 self.ui_kbd.write(e.EV_KEY, code_id, 1 if val else 0)
                 self.ui_kbd.syn()
-            else:
+            elif self.ui_pad:
                 self.ui_pad.write(e.EV_KEY, code_id, 1 if val else 0)
+        if self.ui_pad and any(spec_map.get(n, {}).get("kind") == "axis" for n in changed):
+            now = {**self.pressed, **changed}
+            totals = {}
+            for name in INPUT_NAMES:
+                spec = spec_map.get(name, {})
+                if spec.get("kind") == "axis" and spec.get("code") in STICK_DIRECTIONS:
+                    axis, direction = STICK_DIRECTIONS[spec["code"]]
+                    totals.setdefault(axis, 0)
+                    if now[name]:
+                        totals[axis] += direction
+            for axis, total in totals.items():
+                value = STICK_MAX if total > 0 else STICK_MIN if total < 0 else 0
+                if self.stick_value.get(axis) != value:
+                    self.stick_value[axis] = value
+                    self.ui_pad.write(e.EV_ABS, e.ecodes[axis], value)
+            self.ui_pad.syn()
         # B is the trigger finger's button, so it also always left-clicks
         # the pointer device when the IR pointer is active -- same as the
         # real Wii's UI convention -- independent of B's own mapping above.
@@ -1229,20 +1293,16 @@ class Wiimote:
             if report_id == 0x31 and len(data) >= 7:
                 b0, b1, ax, ay, az = data[2], data[3], data[4], data[5], data[6]
                 self._apply_buttons(b0, b1)
-                self.ui_pad.write(e.EV_ABS, e.ABS_X, ax - 128)
-                self.ui_pad.write(e.EV_ABS, e.ABS_Y, ay - 128)
-                self.ui_pad.write(e.EV_ABS, e.ABS_Z, az - 128)
-                self.ui_pad.syn()
+                self._write_accel(ax, ay, az)
+                self._sync_pad()
             elif report_id == 0x30 and len(data) >= 4:
                 self._apply_buttons(data[2], data[3])
-                self.ui_pad.syn()
+                self._sync_pad()
             elif report_id == 0x33 and len(data) >= 19:
                 b0, b1, ax, ay, az = data[2], data[3], data[4], data[5], data[6]
                 self._apply_buttons(b0, b1)
-                self.ui_pad.write(e.EV_ABS, e.ABS_X, ax - 128)
-                self.ui_pad.write(e.EV_ABS, e.ABS_Y, ay - 128)
-                self.ui_pad.write(e.EV_ABS, e.ABS_Z, az - 128)
-                self.ui_pad.syn()
+                self._write_accel(ax, ay, az)
+                self._sync_pad()
                 self._handle_ir(data[7:19])
             # other report IDs (status/ack/extension) ignored for now
 

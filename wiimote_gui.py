@@ -157,6 +157,12 @@ GAMEPAD_BUTTONS = [
     "BTN_DPAD_UP", "BTN_DPAD_DOWN", "BTN_DPAD_LEFT", "BTN_DPAD_RIGHT",
 ]
 
+# Analog stick directions: the button held = the stick pushed fully that way.
+STICK_CHOICES = [
+    "LSTICK_UP", "LSTICK_DOWN", "LSTICK_LEFT", "LSTICK_RIGHT",
+    "RSTICK_UP", "RSTICK_DOWN", "RSTICK_LEFT", "RSTICK_RIGHT",
+]
+
 KEYSYM_TO_EVDEV = {
     "space": "KEY_SPACE", "Return": "KEY_ENTER", "Escape": "KEY_ESC",
     "Tab": "KEY_TAB", "BackSpace": "KEY_BACKSPACE",
@@ -184,7 +190,7 @@ def fmt_mapping(spec):
     if not spec or spec.get("kind") == "none":
         return "-"
     code = spec.get("code", "")
-    return code.replace("BTN_", "").replace("KEY_", "").title()
+    return code.replace("BTN_", "").replace("KEY_", "").replace("STICK_", "Stk ").replace("_", " ").title()
 
 
 class DiagnosticsDialog(tk.Toplevel):
@@ -231,8 +237,8 @@ class RemapDialog(tk.Toplevel):
 
         tk.Frame(self, height=1, bg="#888").pack(fill="x", padx=16, pady=10)
 
-        tk.Label(self, text="...or choose a gamepad button:").pack(padx=16)
-        self.combo = ttk.Combobox(self, values=GAMEPAD_BUTTONS, state="readonly")
+        tk.Label(self, text="...or a gamepad button / analog stick\ndirection (held = stick fully pushed):", justify="center").pack(padx=16)
+        self.combo = ttk.Combobox(self, values=GAMEPAD_BUTTONS + STICK_CHOICES, state="readonly")
         self.combo.pack(padx=16, pady=(4, 10))
         self.combo.bind("<<ComboboxSelected>>", self._on_combo)
 
@@ -255,7 +261,8 @@ class RemapDialog(tk.Toplevel):
             self.destroy()
 
     def _on_combo(self, _event):
-        self.on_set("button", self.combo.get())
+        choice = self.combo.get()
+        self.on_set("axis" if choice in STICK_CHOICES else "button", choice)
         self.destroy()
 
     def _on_unmap(self):
@@ -278,10 +285,12 @@ class DeviceColumn:
         ptr_row = tk.Frame(self.frame)
         ptr_row.pack(fill="x", pady=(0, 4))
         self.ptr_var = tk.BooleanVar(value=False)
+        self.joy_var = tk.BooleanVar(value=True)
         self.ix_var = tk.BooleanVar(value=True)
         self.iy_var = tk.BooleanVar(value=False)
         self._suppress = True
         self.ptr_checks = [
+            tk.Checkbutton(ptr_row, text="Show as joystick", variable=self.joy_var, command=self._send_pointer),
             tk.Checkbutton(ptr_row, text="Pointer", variable=self.ptr_var, command=self._send_pointer),
             tk.Checkbutton(ptr_row, text="Flip X", variable=self.ix_var, command=self._send_pointer),
             tk.Checkbutton(ptr_row, text="Flip Y", variable=self.iy_var, command=self._send_pointer),
@@ -289,8 +298,9 @@ class DeviceColumn:
         for c in self.ptr_checks:
             c.config(state="disabled")
         self.ptr_checks[0].pack(side="top", anchor="w")
-        self.ptr_checks[1].pack(side="left")
+        self.ptr_checks[1].pack(side="top", anchor="w")
         self.ptr_checks[2].pack(side="left")
+        self.ptr_checks[3].pack(side="left")
         self._suppress = False
 
         self.row_buttons = {}
@@ -323,6 +333,7 @@ class DeviceColumn:
 
     def set_pointer_config(self, cfg):
         self._suppress = True
+        self.joy_var.set(cfg.get("joystick", True))
         self.ptr_var.set(cfg.get("enabled", False))
         self.ix_var.set(cfg.get("invert_x", True))
         self.iy_var.set(cfg.get("invert_y", False))
@@ -338,7 +349,7 @@ class DeviceColumn:
             return
         self.app.send({
             "type": "set_pointer", "addr": self.addr,
-            "enabled": self.ptr_var.get(), "invert_x": self.ix_var.get(), "invert_y": self.iy_var.get(),
+            "enabled": self.ptr_var.get(), "joystick": self.joy_var.get(), "invert_x": self.ix_var.get(), "invert_y": self.iy_var.get(),
         })
 
     def _open_remap(self, name):
@@ -426,7 +437,10 @@ class GuiApp:
         self.adapters_tree.column("devices", width=280)
         self.adapters_tree.pack(fill="x", padx=10, pady=(0, 8))
         tk.Label(parent, justify="left", anchor="w", wraplength=520,
-                 text="Pointer: use the remote's IR camera to move the mouse. "
+                 text="Show as joystick: untick to make the remote act only as a keyboard "
+                      "(and pointer), so games never see a gamepad. Gamepad-button "
+                      "mappings do nothing in that mode - use keys.\n"
+                      "Pointer: use the remote's IR camera to move the mouse. "
                       "Flip X / Flip Y: reverse the horizontal / vertical pointer direction "
                       "if it moves the wrong way (Flip X is on by default because the camera "
                       "sees the IR source mirrored).").pack(anchor="w", padx=10, pady=(0, 8))
